@@ -20,8 +20,8 @@ pub const DEFAULT_THREAT_INTEL_FILE: &str = "threat-intel.txt";
 /// Minimum interval between control-plane threat-intel sync attempts.
 pub const THREAT_INTEL_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Risk score bonus applied when an IOC match is detected.
-pub const IOC_RISK_PENALTY: u8 = 50;
+/// Risk score for IOC matches — always exceeds default block thresholds.
+pub const IOC_BLOCK_SCORE: u8 = 100;
 
 /// Telemetry marker appended for control-plane ingest when an IOC hits.
 pub const TELEMETRY_IOC_MATCH: &str = "THREAT_INTEL_IOC_MATCH";

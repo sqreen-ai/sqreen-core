@@ -366,6 +366,28 @@ async fn apply_risk_pipeline(
 ) -> Result<Option<RiskOutcome>> {
     let tool_name = parse_tool_name(&input.tools_call_params)?;
     let ioc_match = threat_intel.matches_payload(&input.tools_call_params);
+
+    if ioc_match {
+        logger
+            .log_inspection(
+                direction,
+                "threat intel: THREAT_INTEL_IOC_MATCH — unconditional block",
+            )
+            .await?;
+        session_tracker.record(&tool_name);
+        emit_telemetry(
+            cloud_client,
+            &tool_name,
+            threat_intel::IOC_BLOCK_SCORE,
+            threat_intel::TELEMETRY_IOC_MATCH,
+            UserDecision::Denied,
+        );
+        return Ok(Some(RiskOutcome::Denied {
+            id: input.request_id.clone(),
+            reason: "THREAT_INTEL_IOC_MATCH: blocked known indicator in tool payload".to_string(),
+        }));
+    }
+
     let behavioral_anomaly =
         session_tracker.verify_behavioral_chain(&tool_name, &input.tools_call_params);
     let analysis = analyze_params(&tool_name, &input.tools_call_params);
@@ -375,11 +397,6 @@ async fn apply_risk_pipeline(
     let force_gate = security.force_confirmation_gate || effective_score >= threshold;
     let security_marker = security.telemetry_marker;
 
-    if ioc_match {
-        logger
-            .log_inspection(direction, "threat intel: IOC match in tool payload")
-            .await?;
-    }
     if behavioral_anomaly {
         logger
             .log_inspection(
@@ -461,8 +478,6 @@ async fn apply_risk_pipeline(
             reason: if behavioral_anomaly {
                 "BEHAVIORAL_CHAIN_ANOMALY: operator denied exfiltration-risk tool chain"
                     .to_string()
-            } else if ioc_match {
-                "THREAT_INTEL_IOC_MATCH: operator denied IOC-tainted tool call".to_string()
             } else {
                 "user denied high-risk tool call".to_string()
             },
