@@ -23,7 +23,7 @@ bash mcp-proxy/scripts/e2e-threat-intel-test.sh
 
 ## Security
 
-See [SECURITY.md](SECURITY.md). Report vulnerabilities to security@sqreen.ai — do not open public issues for security bugs.
+See [SECURITY.md](.github/SECURITY.md). Report vulnerabilities to security@sqreen.ai — do not open public issues for security bugs.
 
 ## License
 

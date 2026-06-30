@@ -1,8 +1,36 @@
-.DS_Store
-mcp-proxy/target/
-mcp-proxy/mcp-proxy.log
-mcp-proxy/*.tar.gz
-mcp-proxy/dist/
+# ====================================================================
+# Sqreen.ai Core Open-Core - Official Public .gitignore
+# ====================================================================
+
+# --- Rust & Cargo Core Footprints ---
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# --- Local Environment & Secret Stores ---
 .env
 .env.*
 !.env.example
+env
+~/.config/mcp-proxy/env
+
+# --- Operating System & Desktop Leftovers ---
+.DS_Store
+Thumbs.db
+*.log
+*.bak
+*.bak.*
+
+# --- IDE Settings & Workspace Metadata ---
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# --- Platform Testing Sidecars ---
+/mcp-proxy/examples/demo_plugin/target/
+*.tar.gz
+bin/
