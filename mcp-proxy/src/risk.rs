@@ -187,22 +187,22 @@ pub struct SecurityLayerEvaluation {
 
 /// Merges IOC and behavioral detections into a single gate/score decision.
 ///
-/// Either signal forces the `/dev/tty` confirmation gate. IOC matches add
-/// [`crate::threat_intel::IOC_RISK_PENALTY`]; behavioral chains clamp to 100.
+/// IOC matches clamp to [`crate::threat_intel::IOC_BLOCK_SCORE`] (unconditional
+/// block in the risk pipeline). Behavioral chains clamp to 100 and force the gate.
 pub fn apply_security_layers(
     base_score: u8,
     ioc_match: bool,
     behavioral_anomaly: bool,
 ) -> SecurityLayerEvaluation {
     use crate::behavior::TELEMETRY_BEHAVIORAL_CHAIN;
-    use crate::threat_intel::{IOC_RISK_PENALTY, TELEMETRY_IOC_MATCH};
+    use crate::threat_intel::{IOC_BLOCK_SCORE, TELEMETRY_IOC_MATCH};
 
     let mut score = base_score;
     let mut force_gate = false;
     let mut marker = None;
 
     if ioc_match {
-        score = score.saturating_add(IOC_RISK_PENALTY).min(100);
+        score = IOC_BLOCK_SCORE;
         force_gate = true;
         marker = Some(TELEMETRY_IOC_MATCH);
     }
@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn security_layers_force_gate_on_ioc() {
         let eval = apply_security_layers(20, true, false);
-        assert_eq!(eval.effective_score, 70);
+        assert_eq!(eval.effective_score, 100);
         assert!(eval.force_confirmation_gate);
         assert_eq!(eval.telemetry_marker, Some("THREAT_INTEL_IOC_MATCH"));
     }
