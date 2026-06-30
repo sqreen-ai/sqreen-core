@@ -1,0 +1,27 @@
+version: "1"
+global:
+  redact_keys: ["OPENAI_API_KEY", "STRIPE_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"]
+  risk_threshold: 70
+  block_patterns: &sensitive_paths ["\\.\\./\\.\\./", "~/.ssh/.*", "~/.aws/.*", "\\.ssh/", "\\.aws/credentials", "id_rsa(\\.|$)", "id_ed25519(\\.|$)"]
+tools:
+  - name: "execute_bash"
+    action: "Confirm"
+    block_patterns: ["rm -rf .*", "curl.*|sh", "chmod .*"]
+  - name: "read_file"
+    action: "Allow"
+    block_patterns: &sensitive_paths ["\\.\\./\\.\\./", "~/.ssh/.*", "~/.aws/.*", "\\.ssh/", "\\.aws/credentials"]
+  - name: "read_text_file"
+    action: "Allow"
+    block_patterns: *sensitive_paths
+  - name: "read_media_file"
+    action: "Allow"
+    block_patterns: *sensitive_paths
+  - name: "read_multiple_files"
+    action: "Allow"
+    block_patterns: *sensitive_paths
+  - name: "get_file_info"
+    action: "Allow"
+    block_patterns: *sensitive_paths
+  - name: "search_files"
+    action: "Allow"
+    block_patterns: *sensitive_paths

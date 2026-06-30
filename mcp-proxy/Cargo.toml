@@ -1,0 +1,22 @@
+[package]
+name = "mcp-proxy"
+version = "0.1.8"
+edition = "2021"
+description = "Local-first runtime security firewall for MCP (Model Context Protocol)"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[[bin]]
+name = "mcp-proxy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+regex = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+serde_yaml = "0.9"
+tokio = { version = "1.43", features = ["full"] }
+wasmtime = "29"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", features = ["serde"] }

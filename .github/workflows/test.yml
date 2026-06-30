@@ -1,0 +1,51 @@
+# Public sqreen-core CI — copy to sqreen-core/.github/workflows/test.yml via extract script
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    name: mcp-proxy (unit + local e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Unit tests
+        working-directory: mcp-proxy
+        run: cargo test --locked
+
+      - name: Build release binary
+        working-directory: mcp-proxy
+        run: cargo build --release --locked
+
+      - name: E2E policy enforcement
+        env:
+          MCP_PROXY_BIN: ${{ github.workspace }}/mcp-proxy/target/release/mcp-proxy
+          MCP_POLICY_PATH: ${{ github.workspace }}/mcp-proxy/mcp-policy.yaml
+        run: bash mcp-proxy/scripts/e2e-policy-test.sh
+
+      - name: E2E behavioral exfil chain
+        env:
+          MCP_PROXY_BIN: ${{ github.workspace }}/mcp-proxy/target/release/mcp-proxy
+          MCP_POLICY_PATH: ${{ github.workspace }}/mcp-proxy/mcp-policy.yaml
+        run: bash mcp-proxy/scripts/e2e-behavioral-chain-test.sh
+
+      - name: E2E threat-intel IOC match
+        env:
+          MCP_PROXY_BIN: ${{ github.workspace }}/mcp-proxy/target/release/mcp-proxy
+          MCP_POLICY_PATH: ${{ github.workspace }}/mcp-proxy/mcp-policy.yaml
+        run: bash mcp-proxy/scripts/e2e-threat-intel-test.sh
+
+  hooks:
+    name: Cursor hooks smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Hook smoke tests
+        run: bash mcp-proxy/scripts/test-cursor-hook.sh

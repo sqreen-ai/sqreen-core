@@ -1,0 +1,2 @@
+# E2E fixture — single IOC for CI smoke tests
+evil-c2.example

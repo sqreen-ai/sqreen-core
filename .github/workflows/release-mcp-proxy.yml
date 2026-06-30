@@ -1,0 +1,104 @@
+name: Release mcp-proxy
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: mcp-proxy-darwin-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: mcp-proxy-darwin-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: mcp-proxy-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: mcp-proxy-linux-aarch64
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        working-directory: mcp-proxy
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tarball
+        run: |
+          mkdir -p dist
+          cp "mcp-proxy/target/${{ matrix.target }}/release/mcp-proxy" dist/
+          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist mcp-proxy
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true
+
+  publish-sqreen:
+    name: Publish binaries to sqreen.ai
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Stage release assets for sqreen.ai
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p "frontend/public/releases/${VERSION}" "frontend/public/releases/latest"
+          cp artifacts/*.tar.gz "frontend/public/releases/${VERSION}/"
+          cp artifacts/*.tar.gz "frontend/public/releases/latest/"
+          printf '{"version":"%s"}\n' "$VERSION" > frontend/public/releases/manifest.json
+          ls -lh "frontend/public/releases/${VERSION}/"
+
+      - name: Commit and push release assets
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/public/releases/
+          if git diff --staged --quiet; then
+            echo "No release asset changes to publish."
+            exit 0
+          fi
+          git commit -m "Publish ${GITHUB_REF_NAME} mcp-proxy binaries on sqreen.ai"
+          git push origin main

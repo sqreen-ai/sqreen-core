@@ -1,0 +1,8 @@
+.DS_Store
+mcp-proxy/target/
+mcp-proxy/mcp-proxy.log
+mcp-proxy/*.tar.gz
+mcp-proxy/dist/
+.env
+.env.*
+!.env.example
