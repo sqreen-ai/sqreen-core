@@ -16,7 +16,11 @@
 curl -fsSL https://sqreen.ai/install.sh | bash
 ```
 
-Pre-built binaries for **v0.1.9** are on the [Releases](https://github.com/sdk-bens/sqreen-core/releases) page.
+Pre-built binaries for **v0.1.10** are on the [Releases](https://github.com/sdk-bens/sqreen-core/releases) page.
+
+### v0.1.10 — threat intel hardening
+
+IoC feed matches now **unconditionally block** the request (score 100), with no `/dev/tty` gate. A known-bad hash or domain from the threat-intel feed is treated as a hard stop, not a risk penalty.
 
 ## What's not in the repo (Sqreen Cloud)
 
