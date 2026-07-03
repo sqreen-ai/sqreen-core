@@ -34,6 +34,7 @@ Wire the proxy into your MCP client config — see [mcp-proxy/README.md](mcp-pro
 
 ```bash
 cd mcp-proxy && cargo test
+bash mcp-proxy/scripts/smoke-test-install.sh   # quick post-install check (no Cursor)
 bash mcp-proxy/scripts/e2e-policy-test.sh
 bash mcp-proxy/scripts/e2e-behavioral-chain-test.sh
 bash mcp-proxy/scripts/e2e-threat-intel-test.sh
