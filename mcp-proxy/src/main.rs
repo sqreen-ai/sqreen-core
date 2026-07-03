@@ -16,7 +16,9 @@
 //!
 //! ## Concurrency and thread safety
 //!
-//! - Two independent Tokio tasks relay client→server and server→client.
+//! - Two independent Tokio tasks relay client→server and server→client; when either leg
+//!   ends (client stdin closed or downstream stdout EOF), the other is aborted so the
+//!   process does not hang after a one-shot MCP server exits.
 //! - A [`Mutex`] serializes writes to the debug log file across both directions.
 //! - Policy engines are immutable after startup (`Arc<PolicyEngine>`); cloud policy refresh
 //!   occurs at boot (future: background sync).
@@ -772,18 +774,29 @@ async fn relay_server_to_client(
     Ok(())
 }
 
-/// Waits for both relay tasks and returns the first error, if any.
-async fn join_relays(
+/// Runs both relay tasks until one leg finishes, then aborts the other.
+///
+/// Without this, a downstream MCP server that exits after one response leaves the
+/// client→server task blocked on stdin forever.
+async fn run_relays_until_either_ends(
     client_to_server: JoinHandle<Result<()>>,
     server_to_client: JoinHandle<Result<()>>,
 ) -> Result<()> {
-    let (client_result, server_result) = tokio::join!(client_to_server, server_to_client);
+    let client_abort = client_to_server.abort_handle();
+    let server_abort = server_to_client.abort_handle();
 
-    let client_relay = client_result.context("client-to-server relay task panicked")??;
-    let server_relay = server_result.context("server-to-client relay task panicked")??;
+    let first_result = tokio::select! {
+        client_result = client_to_server => {
+            server_abort.abort();
+            client_result.context("client-to-server relay task panicked")?
+        }
+        server_result = server_to_client => {
+            client_abort.abort();
+            server_result.context("server-to-client relay task panicked")?
+        }
+    };
 
-    let _ = (client_relay, server_relay);
-    Ok(())
+    first_result
 }
 
 /// Ensures the child process is reaped after relay shutdown.
@@ -900,7 +913,7 @@ async fn main() -> Result<()> {
         .await
     });
 
-    let relay_result = join_relays(client_to_server, server_to_client).await;
+    let relay_result = run_relays_until_either_ends(client_to_server, server_to_client).await;
 
     if let Err(error) = shutdown_child(child).await {
         eprintln!("mcp-proxy: warning during child shutdown: {error:#}");
