@@ -32,6 +32,8 @@ Wire the proxy into your MCP client config — see [mcp-proxy/README.md](mcp-pro
 
 ## Verify
 
+See [docs/CLEAN_INSTALL.md](docs/CLEAN_INSTALL.md) for post-install checks.
+
 ```bash
 cd mcp-proxy && cargo test
 bash mcp-proxy/scripts/smoke-test-install.sh   # quick post-install check (no Cursor)

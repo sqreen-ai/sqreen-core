@@ -41,6 +41,12 @@ jobs:
           MCP_POLICY_PATH: ${{ github.workspace }}/mcp-proxy/mcp-policy.yaml
         run: bash mcp-proxy/scripts/e2e-threat-intel-test.sh
 
+      - name: Post-install smoke (no hang regression)
+        env:
+          MCP_PROXY_BIN: ${{ github.workspace }}/mcp-proxy/target/release/mcp-proxy
+          MCP_POLICY_PATH: ${{ github.workspace }}/mcp-proxy/mcp-policy.yaml
+        run: bash mcp-proxy/scripts/smoke-test-install.sh
+
   hooks:
     name: Cursor hooks smoke
     runs-on: ubuntu-latest

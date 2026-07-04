@@ -774,18 +774,19 @@ async fn relay_server_to_client(
     Ok(())
 }
 
-/// Runs both relay tasks until one leg finishes, then aborts the other.
+/// Runs relay tasks until a leg finishes or the downstream child exits, then aborts the rest.
 ///
 /// Without this, a downstream MCP server that exits after one response leaves the
 /// client→server task blocked on stdin forever.
-async fn run_relays_until_either_ends(
+async fn run_until_shutdown(
+    mut child: Child,
     client_to_server: JoinHandle<Result<()>>,
     server_to_client: JoinHandle<Result<()>>,
 ) -> Result<()> {
     let client_abort = client_to_server.abort_handle();
     let server_abort = server_to_client.abort_handle();
 
-    let first_result = tokio::select! {
+    tokio::select! {
         client_result = client_to_server => {
             server_abort.abort();
             client_result.context("client-to-server relay task panicked")?
@@ -794,18 +795,15 @@ async fn run_relays_until_either_ends(
             client_abort.abort();
             server_result.context("server-to-client relay task panicked")?
         }
-    };
-
-    first_result
-}
-
-/// Ensures the child process is reaped after relay shutdown.
-async fn shutdown_child(mut child: Child) -> Result<()> {
-    match child.wait().await {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => bail!("downstream MCP server exited with status: {status}"),
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
-        Err(error) => Err(error).context("failed while waiting for downstream MCP server"),
+        wait_result = child.wait() => {
+            client_abort.abort();
+            server_abort.abort();
+            match wait_result {
+                Ok(_status) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+                Err(error) => Err(error).context("failed while waiting for downstream MCP server"),
+            }
+        }
     }
 }
 
@@ -913,11 +911,8 @@ async fn main() -> Result<()> {
         .await
     });
 
-    let relay_result = run_relays_until_either_ends(client_to_server, server_to_client).await;
-
-    if let Err(error) = shutdown_child(child).await {
-        eprintln!("mcp-proxy: warning during child shutdown: {error:#}");
-    }
+    let relay_result =
+        run_until_shutdown(child, client_to_server, server_to_client).await;
 
     relay_result
 }
