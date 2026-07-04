@@ -786,23 +786,44 @@ async fn run_until_shutdown(
     let client_abort = client_to_server.abort_handle();
     let server_abort = server_to_client.abort_handle();
 
-    tokio::select! {
-        client_result = client_to_server => {
-            server_abort.abort();
-            client_result.context("client-to-server relay task panicked")?
-        }
-        server_result = server_to_client => {
-            client_abort.abort();
-            server_result.context("server-to-client relay task panicked")?
-        }
-        wait_result = child.wait() => {
-            client_abort.abort();
-            server_abort.abort();
-            match wait_result {
-                Ok(_status) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
-                Err(error) => Err(error).context("failed while waiting for downstream MCP server"),
+    tokio::pin!(client_to_server);
+    tokio::pin!(server_to_client);
+
+    let mut client_done = false;
+    let mut server_done = false;
+
+    loop {
+        tokio::select! {
+            client_result = &mut client_to_server, if !client_done => {
+                client_result
+                    .context("client-to-server relay task join failed")?
+                    .context("client-to-server relay task panicked")?;
+                client_done = true;
             }
+            server_result = &mut server_to_client, if !server_done => {
+                server_result
+                    .context("server-to-client relay task join failed")?
+                    .context("server-to-client relay task panicked")?;
+                server_done = true;
+                if !client_done {
+                    client_abort.abort();
+                }
+            }
+            wait_result = child.wait(), if !client_done || !server_done => {
+                client_abort.abort();
+                server_abort.abort();
+                match wait_result {
+                    Ok(_status) => return Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => return Ok(()),
+                    Err(error) => {
+                        return Err(error).context("failed while waiting for downstream MCP server");
+                    }
+                }
+            }
+        }
+
+        if client_done && server_done {
+            return Ok(());
         }
     }
 }
