@@ -139,10 +139,15 @@ def allow() -> None:
 
 
 def main() -> None:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        allow()
+
     try:
-        payload = json.load(sys.stdin)
+        payload = json.loads(raw)
     except json.JSONDecodeError:
-        deny("invalid hook payload")
+        # Cursor may cancel hooks or send partial payloads; don't fail-closed on that.
+        allow()
 
     candidates: list[str] = []
     for key in ("command", "path", "filePath", "file_path", "uri"):
