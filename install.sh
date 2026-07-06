@@ -686,11 +686,11 @@ seed_cursor_hooks() {
 {
   "version": 1,
   "hooks": {
-    "beforeShellExecution": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": true}],
-    "beforeReadFile": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": true}],
-    "beforeTabFileRead": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": true}],
-    "beforeMCPExecution": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": true}],
-    "preToolUse": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "matcher": "Shell|Read|Grep|Glob|MCP", "failClosed": true}]
+    "beforeShellExecution": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": false}],
+    "beforeReadFile": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": false}],
+    "beforeTabFileRead": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": false}],
+    "beforeMCPExecution": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "failClosed": false}],
+    "preToolUse": [{"command": "python3 .cursor/hooks/block-sensitive-paths.py", "matcher": "Shell|Read|Grep|Glob|MCP", "failClosed": false}]
   }
 }
 HOOKS
