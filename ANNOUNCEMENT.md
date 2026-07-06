@@ -16,7 +16,12 @@
 curl -fsSL https://sqreen.ai/install.sh | bash
 ```
 
-Pre-built binaries for **v0.1.10** are on the [Releases](https://github.com/sdk-bens/sqreen-core/releases) page.
+Pre-built binaries for **v0.1.11** are on the [Releases](https://github.com/sdk-bens/sqreen-core/releases) page.
+
+### v0.1.11 — proxy lifecycle + Cursor hooks
+
+- **Run mode no longer hangs** after one-shot MCP servers exit (stdin EOF or downstream stdout close).
+- **Cursor project hooks** tolerate canceled/empty payloads; `failClosed` defaults to `false` so hook infrastructure glitches do not block the agent.
 
 ### v0.1.10 — threat intel hardening
 
