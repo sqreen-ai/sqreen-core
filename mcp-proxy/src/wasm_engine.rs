@@ -27,6 +27,10 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use wasmtime::{Caller, Engine, Linker, Memory, Module, Store};
 
+fn map_wasm_err(context: impl std::fmt::Display) -> impl Fn(wasmtime::Error) -> anyhow::Error {
+    move |error| anyhow::anyhow!("{context}: {error}")
+}
+
 /// Environment variable pointing at a compiled policy extension module (`.wasm`).
 pub const WASM_POLICY_ENV: &str = "MCP_WASM_POLICY";
 
@@ -70,9 +74,8 @@ impl WasmPolicyEngine {
     /// Loads, compiles, and links a policy module from disk.
     pub fn new(wasm_file_path: &str) -> Result<Self> {
         let engine = Engine::default();
-        let module = Module::from_file(&engine, wasm_file_path).with_context(|| {
-            format!("failed to load wasm policy module from {wasm_file_path}")
-        })?;
+        let module = Module::from_file(&engine, wasm_file_path)
+            .map_err(map_wasm_err(format!("failed to load wasm policy module from {wasm_file_path}")))?;
 
         let mut linker = Linker::new(&engine);
         linker.func_wrap("env", "log_violation", host_log_violation)?;
@@ -150,7 +153,7 @@ impl WasmPolicyEngine {
         let instance = self
             .linker
             .instantiate(&mut store, &self.module)
-            .context("failed to instantiate wasm policy module")?;
+            .map_err(map_wasm_err("failed to instantiate wasm policy module"))?;
 
         let memory = instance
             .get_memory(&mut store, "memory")
@@ -161,7 +164,7 @@ impl WasmPolicyEngine {
         {
             input_ptr
                 .call(&mut store, ())
-                .context("input_ptr call failed")?
+                .map_err(map_wasm_err("input_ptr call failed"))?
         } else {
             INPUT_BUFFER_OFFSET as i32
         };
@@ -176,11 +179,13 @@ impl WasmPolicyEngine {
 
         let evaluate = instance
             .get_typed_func::<i32, i32>(&mut store, "evaluate_policy")
-            .context("wasm policy module must export `evaluate_policy(i32) -> i32`")?;
+            .map_err(map_wasm_err(
+                "wasm policy module must export `evaluate_policy(i32) -> i32`",
+            ))?;
 
         let decision_code = evaluate
             .call(&mut store, payload_bytes.len() as i32)
-            .context("evaluate_policy call failed")?;
+            .map_err(map_wasm_err("evaluate_policy call failed"))?;
 
         match decision_code {
             DECISION_ALLOW => Ok(WasmDecision::Allow),
@@ -273,7 +278,7 @@ fn write_guest_bytes(
     let ptr = ptr as usize;
     memory
         .write(store, ptr, bytes)
-        .with_context(|| format!("failed to write {label} into guest memory"))
+        .map_err(|error| anyhow::anyhow!("failed to write {label} into guest memory: {error}"))
 }
 
 fn append_violation_log(state: &mut HostState, message: &str) -> Result<()> {
