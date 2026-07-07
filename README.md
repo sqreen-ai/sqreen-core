@@ -1,7 +1,7 @@
 # Sqreen Core
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/sdk-bens/sqreen-core)](https://github.com/sdk-bens/sqreen-core/releases)
+[![Release](https://img.shields.io/github/v/release/sqreen-ai/sqreen-core)](https://github.com/sqreen-ai/sqreen-core/releases)
 
 **Open-core local-first RASP** for Model Context Protocol (MCP) tool calls — sub-millisecond policy enforcement on developer laptops.
 
@@ -24,7 +24,7 @@ Runs **fully offline** by default. Cloud policy sync and SOC fleet management ar
 curl -fsSL https://sqreen.ai/install.sh | bash
 
 # From source
-git clone https://github.com/sdk-bens/sqreen-core.git
+git clone https://github.com/sqreen-ai/sqreen-core.git
 cd sqreen-core/mcp-proxy && cargo build --release
 ```
 

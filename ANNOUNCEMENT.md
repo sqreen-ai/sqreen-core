@@ -2,7 +2,7 @@
 
 **Today we're open-sourcing the local security engine behind Sqreen.ai.**
 
-[Sqreen Core](https://github.com/sdk-bens/sqreen-core) is a Rust stdio proxy that sits between your AI coding agent and MCP tool servers. It inspects every JSON-RPC frame in under a millisecond — blocking sensitive file reads, masking secrets, matching IOC feeds, and enforcing behavioral chains — **fully on the developer laptop, with no cloud dependency.**
+[Sqreen Core](https://github.com/sqreen-ai/sqreen-core) is a Rust stdio proxy that sits between your AI coding agent and MCP tool servers. It inspects every JSON-RPC frame in under a millisecond — blocking sensitive file reads, masking secrets, matching IOC feeds, and enforcing behavioral chains — **fully on the developer laptop, with no cloud dependency.**
 
 ## What's in the repo
 
@@ -16,7 +16,7 @@
 curl -fsSL https://sqreen.ai/install.sh | bash
 ```
 
-Pre-built binaries for **v0.1.11** are on the [Releases](https://github.com/sdk-bens/sqreen-core/releases) page.
+Pre-built binaries for **v0.1.11** are on the [Releases](https://github.com/sqreen-ai/sqreen-core/releases) page.
 
 ### v0.1.11 — proxy lifecycle + Cursor hooks
 
@@ -37,7 +37,7 @@ AI agents run with filesystem and shell access on real developer machines. Secur
 
 ## Get involved
 
-- ⭐ Star the repo: [github.com/sdk-bens/sqreen-core](https://github.com/sdk-bens/sqreen-core)
+- ⭐ Star the repo: [github.com/sqreen-ai/sqreen-core](https://github.com/sqreen-ai/sqreen-core)
 - 🐛 Report bugs via GitHub Issues (security issues → security@sqreen.ai)
 - 🔧 PRs welcome — see `cargo test` and e2e scripts in the README
 
