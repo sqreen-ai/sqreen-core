@@ -41,7 +41,7 @@ SKIP_IDE=0
 INSTALL_DIR="${MCP_PROXY_INSTALL_DIR:-${HOME}/.local/bin}"
 CONFIG_DIR="${MCP_PROXY_CONFIG_DIR:-${HOME}/.config/mcp-proxy}"
 DATA_DIR="${MCP_PROXY_DATA_DIR:-${HOME}/.local/share/mcp-proxy}"
-GITHUB_REPO="${MCP_PROXY_GITHUB_REPO:-sdk-bens/sqreen-core}"
+GITHUB_REPO="${MCP_PROXY_GITHUB_REPO:-sqreen-ai/sqreen-core}"
 SQREEN_RELEASE_BASE="${MCP_PROXY_SQREEN_RELEASE_URL:-https://sqreen.ai/releases}"
 RELEASE_BASE="${MCP_PROXY_RELEASE_URL:-https://github.com/${GITHUB_REPO}/releases}"
 SOURCE_BRANCH="${MCP_PROXY_SOURCE_BRANCH:-main}"
@@ -94,7 +94,7 @@ Options:
 Environment:
   MCP_PROXY_SQREEN_RELEASE_URL  Primary release mirror (default: sqreen.ai/releases)
   MCP_PROXY_RELEASE_URL   GitHub releases fallback base
-  MCP_PROXY_GITHUB_REPO   owner/repo for source fallback (default: sdk-bens/sqreen-core)
+  MCP_PROXY_GITHUB_REPO   owner/repo for source fallback (default: sqreen-ai/sqreen-core)
   MCP_PROXY_INSTALL_DIR   Binary destination (default: ~/.local/bin)
   MCP_PROXY_CONFIG_DIR    Config directory (default: ~/.config/mcp-proxy)
 EOF
@@ -502,7 +502,7 @@ Quick start:
   mcp-proxy -- run npx @modelcontextprotocol/server-filesystem /tmp
 
 Docs:
-  https://github.com/sdk-bens/sqreen/tree/main/mcp-proxy
+  https://github.com/sqreen-ai/sqreen/tree/main/mcp-proxy
 README
   fi
 
@@ -754,7 +754,7 @@ main() {
   info "Logs:    ${DATA_DIR}/mcp-proxy.log"
   printf "\n"
   info "Verify (optional): clone sqreen-core and run mcp-proxy/scripts/smoke-test-install.sh"
-  info "Docs: https://github.com/sdk-bens/sqreen-core/blob/main/docs/CLEAN_INSTALL.md"
+  info "Docs: https://github.com/sqreen-ai/sqreen-core/blob/main/docs/CLEAN_INSTALL.md"
   printf "\n"
   info "Restart Claude Desktop / Cursor, or run manually:"
   printf "  source %s\n" "${CONFIG_DIR}/env"

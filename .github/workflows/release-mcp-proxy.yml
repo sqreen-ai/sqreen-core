@@ -78,9 +78,9 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           if [ -z "${GH_TOKEN}" ]; then
             echo "SQREEN_ENTERPRISE_PAT not set — skip auto-sync."
-            echo "Run publish-proxy-release in sdk-bens/sqreen-enterprise with version=${VERSION}"
+            echo "Run publish-proxy-release in sqreen-ai/sqreen-enterprise with version=${VERSION}"
             exit 0
           fi
           gh workflow run publish-proxy-release.yml \
-            --repo sdk-bens/sqreen-enterprise \
+            --repo sqreen-ai/sqreen-enterprise \
             -f "version=${VERSION}"
