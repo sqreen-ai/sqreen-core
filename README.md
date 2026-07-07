@@ -57,7 +57,7 @@ AI Agent ──► mcp-proxy (local RASP) ──► MCP tool server
 - Device-token fleet enrollment
 - SOC console at [console.sqreen.ai](https://console.sqreen.ai)
 
-Contact [sales@sqreen.ai](mailto:sales@sqreen.ai) for enterprise/self-hosted control plane.
+Contact [sdk@sqreen.ai](mailto:sdk@sqreen.ai) for enterprise/self-hosted control plane.
 
 ## Security
 
