@@ -80,26 +80,49 @@ jobs:
           BODY="$(cat posts/github-discussion-body.md)"
           CATEGORY="$(cat posts/github-discussion-category.txt)"
 
-          EXISTING=$(gh api "repos/${{ github.repository }}/discussions" \
-            --jq ".[] | select(.title == $(jq -Rn --arg t "$TITLE" '$t')) | .number" 2>/dev/null | head -1 || true)
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
 
-          if [ -n "$EXISTING" ]; then
-            echo "Discussion already exists: #${EXISTING}"
-            exit 0
-          fi
+          REPO_ID=$(gh api graphql -f query='
+            query($owner:String!, $name:String!) {
+              repository(owner: $owner, name: $name) { id }
+            }' -f owner="${{ github.repository_owner }}" -f name="$REPO_NAME" \
+            --jq '.data.repository.id')
 
-          CAT_ID=$(gh api "repos/${{ github.repository }}/discussions/categories" \
-            --jq ".[] | select(.name == $(jq -Rn --arg c "$CATEGORY" '$c')) | .id" | head -1)
+          CAT_ID=$(gh api graphql -f query='
+            query($owner:String!, $name:String!) {
+              repository(owner: $owner, name: $name) {
+                discussionCategories(first: 20) { nodes { id name } }
+              }
+            }' -f owner="${{ github.repository_owner }}" -f name="$REPO_NAME" \
+            --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"${CATEGORY}\") | .id" | head -1)
 
           if [ -z "$CAT_ID" ]; then
             echo "Could not find discussion category: ${CATEGORY}"
             exit 1
           fi
 
-          gh api "repos/${{ github.repository }}/discussions" \
-            -f title="$TITLE" \
-            -f body="$BODY" \
-            -f category="$CAT_ID"
+          EXISTING=$(gh api graphql -f query='
+            query($owner:String!, $name:String!, $title:String!) {
+              repository(owner: $owner, name: $name) {
+                discussions(first: 50, orderBy: {field: CREATED_AT, direction: DESC}) {
+                  nodes { title number }
+                }
+              }
+            }' -f owner="${{ github.repository_owner }}" -f name="$REPO_NAME" \
+            --jq ".data.repository.discussions.nodes[] | select(.title == \"${TITLE}\") | .number" | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Discussion already exists: #${EXISTING}"
+            exit 0
+          fi
+
+          gh api graphql -f query='
+            mutation($repo:ID!, $cat:ID!, $title:String!, $body:String!) {
+              createDiscussion(input: {repositoryId: $repo, categoryId: $cat, title: $title, body: $body}) {
+                discussion { url }
+              }
+            }' -f repo="$REPO_ID" -f cat="$CAT_ID" -f title="$TITLE" -f body="$BODY" \
+            --jq '.data.createDiscussion.discussion.url'
           echo "Created GitHub Discussion for ${VERSION}"
 
   bluesky:
