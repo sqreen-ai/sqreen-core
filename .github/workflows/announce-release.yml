@@ -1,0 +1,165 @@
+name: Announce release (social + discussion)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v0.1.11)"
+        required: true
+      post_bluesky:
+        description: "Post to Bluesky if secrets are configured"
+        type: boolean
+        default: false
+      create_discussion:
+        description: "Create GitHub Discussion in Announcements"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  discussions: write
+
+jobs:
+  render:
+    name: Render launch copy
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      out_dir: ${{ steps.render.outputs.out_dir }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${{ github.event.release.tag_name }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Render platform posts
+        id: render
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          OUT="launch/rendered/${VERSION}"
+          bash scripts/render-launch-posts.sh "$VERSION" --out "$OUT"
+          echo "out_dir=${OUT}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: launch-posts-${{ steps.ver.outputs.version }}
+          path: launch/rendered/${{ steps.ver.outputs.version }}/
+          retention-days: 30
+
+  github-discussion:
+    name: GitHub Discussion
+    needs: render
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.create_discussion) ||
+      (github.event_name == 'release')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download rendered posts
+        uses: actions/download-artifact@v5
+        with:
+          name: launch-posts-${{ needs.render.outputs.version }}
+          path: posts
+
+      - name: Create or skip discussion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.render.outputs.version }}"
+          TITLE="$(cat posts/github-discussion-title.txt)"
+          BODY="$(cat posts/github-discussion-body.md)"
+          CATEGORY="$(cat posts/github-discussion-category.txt)"
+
+          EXISTING=$(gh api "repos/${{ github.repository }}/discussions" \
+            --jq ".[] | select(.title == $(jq -Rn --arg t "$TITLE" '$t')) | .number" 2>/dev/null | head -1 || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Discussion already exists: #${EXISTING}"
+            exit 0
+          fi
+
+          CAT_ID=$(gh api "repos/${{ github.repository }}/discussions/categories" \
+            --jq ".[] | select(.name == $(jq -Rn --arg c "$CATEGORY" '$c')) | .id" | head -1)
+
+          if [ -z "$CAT_ID" ]; then
+            echo "Could not find discussion category: ${CATEGORY}"
+            exit 1
+          fi
+
+          gh api "repos/${{ github.repository }}/discussions" \
+            -f title="$TITLE" \
+            -f body="$BODY" \
+            -f category="$CAT_ID"
+          echo "Created GitHub Discussion for ${VERSION}"
+
+  bluesky:
+    name: Bluesky (optional)
+    needs: render
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.post_bluesky) ||
+      (github.event_name == 'release' && vars.POST_TO_BLUESKY == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: launch-posts-${{ needs.render.outputs.version }}
+          path: posts
+
+      - name: Post to Bluesky
+        env:
+          BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+        run: |
+          if [ -z "$BLUESKY_HANDLE" ] || [ -z "$BLUESKY_APP_PASSWORD" ]; then
+            echo "BLUESKY_HANDLE / BLUESKY_APP_PASSWORD not set — skip."
+            exit 0
+          fi
+          pip install --quiet atproto
+          python3 <<'PY'
+          import os
+          from atproto import Client
+
+          text = open("posts/bluesky.txt").read().strip()
+          client = Client()
+          client.login(os.environ["BLUESKY_HANDLE"], os.environ["BLUESKY_APP_PASSWORD"])
+          client.send_post(text)
+          print("Posted to Bluesky")
+          PY
+
+  summary:
+    name: Manual post reminder
+    needs: [render, github-discussion]
+    if: always() && needs.render.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: launch-posts-${{ needs.render.outputs.version }}
+          path: posts
+
+      - name: Print copy-paste instructions
+        run: |
+          VERSION="${{ needs.render.outputs.version }}"
+          echo "## Launch posts ready for ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download the **launch-posts-${VERSION}** artifact for all platform copy." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### X (manual)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat posts/x.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Hacker News (manual)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Title: $(cat posts/hn-title.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- URL: $(cat posts/hn-url.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Optional text in hn-body.md" >> "$GITHUB_STEP_SUMMARY"
