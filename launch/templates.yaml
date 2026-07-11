@@ -1,0 +1,116 @@
+# Platform launch copy — rendered by scripts/render-launch-posts.sh
+# Placeholders: {{version}} {{release_url}} {{discussion_url}} {{install_cmd}} {{repo_url}} {{site_url}}
+
+x:
+  max_length: 280
+  text: |
+    We open-sourced Sqreen Core — local-first RASP for MCP tool calls.
+
+    Sub-ms policy, DLP, threat intel, behavioral chains. 100% on the laptop. MIT.
+
+    {{install_cmd}}
+    {{repo_url}}
+
+hn:
+  title: "Show HN: Sqreen Core – open-source RASP proxy for MCP (Rust, local-first)"
+  url: "{{repo_url}}"
+  text: |
+    Sqreen Core is a Rust stdio proxy between AI coding agents and MCP tool servers. It inspects every JSON-RPC frame locally — blocking sensitive reads, masking secrets, matching IOC feeds, and enforcing behavioral chains — with no cloud dependency.
+
+    Install:
+    {{install_cmd}}
+
+    Release {{version}}: {{release_url}}
+
+    Open core (MIT): mcp-proxy, Wasm policy SDK, install.sh
+    Commercial: fleet policy + SOC console at {{site_url}}
+
+    Happy to answer questions on architecture, policy model, or the open-core vs cloud split.
+
+linkedin:
+  text: |
+    Sqreen Core is now open source (MIT).
+
+    We built a local-first RASP layer for Model Context Protocol (MCP) tool calls — the path between AI coding agents and filesystem/shell tools on developer machines.
+
+    What it does on every tool call (sub-millisecond, fully offline):
+    • Policy enforcement (block sensitive paths, risky commands)
+    • DLP / secret masking
+    • Threat-intel IOC matching
+    • Behavioral chain detection
+
+    One-line install:
+    {{install_cmd}}
+
+    Repo: {{repo_url}}
+    Release {{version}}: {{release_url}}
+
+    Fleet management, policy orchestration, and the SOC console remain on Sqreen Cloud ({{site_url}}). Early access: sdk@sqreen.ai
+
+bluesky:
+  max_length: 300
+  text: |
+    Sqreen Core is open source (MIT) — local-first RASP for MCP tool calls.
+
+    Policy, DLP, threat intel, behavioral chains. Runs on the laptop, no cloud required.
+
+    {{install_cmd}}
+    {{repo_url}}
+
+github_discussion:
+  title: "Announcing Sqreen Core {{version}} — MIT open source RASP for MCP"
+  category: Announcements
+  body: |
+    **Sqreen Core {{version}}** is live.
+
+    Local-first RASP for MCP tool calls — sub-millisecond policy, DLP, threat intel, and behavioral chains on developer laptops. No cloud required.
+
+    ```bash
+    {{install_cmd}}
+    ```
+
+    - Release: {{release_url}}
+    - Repo: {{repo_url}}
+    - Site: {{site_url}}
+
+    Fleet management, policy orchestration, and the SOC console remain commercial (Sqreen Cloud). Questions and feedback welcome here.
+
+reddit:
+  subreddit: r/rust
+  title: "Sqreen Core {{version}} — open-source RASP proxy for MCP tool calls (Rust)"
+  text: |
+    We open-sourced the local security engine behind Sqreen — a Rust stdio proxy that sits between AI agents and MCP servers.
+
+    - MIT licensed: mcp-proxy, Wasm policy SDK, one-line installer
+    - Runs fully offline on macOS/Linux
+    - Blocks sensitive reads, masks secrets, IOC feeds, behavioral chains
+
+    ```bash
+    {{install_cmd}}
+    ```
+
+    {{release_url}}
+
+    Commercial control plane / SOC console is separate. Happy to discuss design tradeoffs.
+
+devto:
+  title: "Sqreen Core is open source — local-first RASP for MCP"
+  tags: rust,security,opensource,ai
+  body: |
+    Today we're open-sourcing **Sqreen Core** — the Rust proxy that inspects every MCP tool call on the developer laptop.
+
+    ## Install
+
+    ```bash
+    {{install_cmd}}
+    ```
+
+    ## What's included
+
+    - **mcp-proxy** — policy, DLP, threat intel, Wasm plugins
+    - **mcp-proxy-sdk** — custom policy plugins
+    - **install.sh** — wraps Cursor / Claude Desktop MCP configs
+
+    Release **{{version}}**: {{release_url}}
+
+    Cloud fleet management remains at {{site_url}}.

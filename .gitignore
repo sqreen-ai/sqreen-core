@@ -2,7 +2,9 @@
 # Sqreen.ai Core Open-Core - Official Public .gitignore
 # ====================================================================
 
-# --- Rust & Cargo Core Footprints ---
+# --- Launch automation (generated) ---
+launch/rendered/
+
 /target/
 Cargo.lock
 **/*.rs.bk
