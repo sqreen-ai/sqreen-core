@@ -37,4 +37,4 @@ Thumbs.db
 mcp-proxy/dist/
 mcp-proxy/target/
 *.tar.gz
-bin/
+/bin/

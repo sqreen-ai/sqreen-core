@@ -707,6 +707,20 @@ mod tests {
             risk_score: 82,
             pattern_matched: r"rm\s+-rf\s+.*".to_string(),
             user_decision: UserDecision::Denied,
+            agent_id: None,
+            agent_label: None,
+            agent_trust: None,
+            agent_identity_source: None,
+            agent_bound_id: None,
+            user_id: None,
+            user_label: None,
+            user_trust: None,
+            session_id: None,
+            session_label: None,
+            session_trust: None,
+            runtime: None,
+            model_provider: None,
+            risk_factors: Vec::new(),
         };
 
         let json = serde_json::to_string(&record).expect("serialize");
