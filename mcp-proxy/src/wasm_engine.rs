@@ -16,23 +16,41 @@
 //!
 //! # Fail-closed invariants
 //!
-//! - Unknown guest decision codes fail the evaluation with an error (caller may abort relay).
+//! - Unknown guest decision codes fail the evaluation with an error, which
+//!   [`crate::gateway::Subsystem::PolicyExtension`] resolves to a denial.
 //! - Rewrite without `report_rewrite` payload is rejected.
 //! - Guest strings that are not valid UTF-8 fail the import and bubble up as errors.
+//!
+//! # Bounded execution
+//!
+//! Every evaluation runs on a fuel budget ([`DEFAULT_FUEL_BUDGET`], overridable through
+//! [`WASM_FUEL_ENV`]). A module that loops forever exhausts its fuel and traps, which
+//! surfaces as an ordinary extension failure and denies the action.
+//!
+//! Without a budget the guest controls how long the host blocks. Since evaluation is
+//! synchronous on the relay's async task, a `loop {}` in an extension does not merely
+//! delay one decision — it wedges the Tokio worker and takes the agent's whole connection
+//! with it. A trust boundary that lets the untrusted side decide when to return is not a
+//! sandbox.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use wasmtime::{Caller, Engine, Linker, Memory, Module, Store};
-
-fn map_wasm_err(context: impl std::fmt::Display) -> impl Fn(wasmtime::Error) -> anyhow::Error {
-    move |error| anyhow::anyhow!("{context}: {error}")
-}
+use wasmtime::{Caller, Config, Engine, Linker, Memory, Module, Store};
 
 /// Environment variable pointing at a compiled policy extension module (`.wasm`).
 pub const WASM_POLICY_ENV: &str = "MCP_WASM_POLICY";
+
+/// Environment variable overriding the per-evaluation fuel budget.
+pub const WASM_FUEL_ENV: &str = "SQREEN_WASM_FUEL";
+
+/// Instructions a policy extension may execute per evaluation.
+///
+/// Roughly two orders of magnitude more than the reference extensions need, so a
+/// legitimate module never notices it, while a runaway one stops in microseconds.
+pub const DEFAULT_FUEL_BUDGET: u64 = 50_000_000;
 
 /// Maximum bytes the host will read from guest linear memory in one call.
 const MAX_GUEST_IO_LEN: usize = 1 << 20;
@@ -73,9 +91,9 @@ pub struct WasmPolicyEngine {
 impl WasmPolicyEngine {
     /// Loads, compiles, and links a policy module from disk.
     pub fn new(wasm_file_path: &str) -> Result<Self> {
-        let engine = Engine::default();
+        let engine = Engine::new(&metered_config()).context("failed to build wasm engine")?;
         let module = Module::from_file(&engine, wasm_file_path)
-            .map_err(map_wasm_err(format!("failed to load wasm policy module from {wasm_file_path}")))?;
+            .with_context(|| format!("failed to load wasm policy module from {wasm_file_path}"))?;
 
         let mut linker = Linker::new(&engine);
         linker.func_wrap("env", "log_violation", host_log_violation)?;
@@ -150,24 +168,27 @@ impl WasmPolicyEngine {
             },
         );
 
+        store
+            .set_fuel(resolve_fuel_budget())
+            .context("failed to set wasm fuel budget")?;
+
         let instance = self
             .linker
             .instantiate(&mut store, &self.module)
-            .map_err(map_wasm_err("failed to instantiate wasm policy module"))?;
+            .context("failed to instantiate wasm policy module")?;
 
         let memory = instance
             .get_memory(&mut store, "memory")
             .context("wasm policy module must export `memory`")?;
 
-        let input_ptr = if let Ok(input_ptr) =
-            instance.get_typed_func::<(), i32>(&mut store, "input_ptr")
-        {
-            input_ptr
-                .call(&mut store, ())
-                .map_err(map_wasm_err("input_ptr call failed"))?
-        } else {
-            INPUT_BUFFER_OFFSET as i32
-        };
+        let input_ptr =
+            if let Ok(input_ptr) = instance.get_typed_func::<(), i32>(&mut store, "input_ptr") {
+                input_ptr
+                    .call(&mut store, ())
+                    .context("input_ptr call failed")?
+            } else {
+                INPUT_BUFFER_OFFSET as i32
+            };
 
         write_guest_bytes(
             &mut store,
@@ -179,13 +200,11 @@ impl WasmPolicyEngine {
 
         let evaluate = instance
             .get_typed_func::<i32, i32>(&mut store, "evaluate_policy")
-            .map_err(map_wasm_err(
-                "wasm policy module must export `evaluate_policy(i32) -> i32`",
-            ))?;
+            .context("wasm policy module must export `evaluate_policy(i32) -> i32`")?;
 
         let decision_code = evaluate
             .call(&mut store, payload_bytes.len() as i32)
-            .map_err(map_wasm_err("evaluate_policy call failed"))?;
+            .context("evaluate_policy call failed")?;
 
         match decision_code {
             DECISION_ALLOW => Ok(WasmDecision::Allow),
@@ -278,7 +297,42 @@ fn write_guest_bytes(
     let ptr = ptr as usize;
     memory
         .write(store, ptr, bytes)
-        .map_err(|error| anyhow::anyhow!("failed to write {label} into guest memory: {error}"))
+        .with_context(|| format!("failed to write {label} into guest memory"))
+}
+
+/// Builds the engine configuration: fuel metering on, everything else default.
+fn metered_config() -> Config {
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    config
+}
+
+/// Resolves the per-evaluation fuel budget.
+///
+/// An unparseable override warns and uses the default rather than silently removing the
+/// bound, which is the same reasoning as every other config fallback in this crate.
+fn resolve_fuel_budget() -> u64 {
+    let Ok(raw) = std::env::var(WASM_FUEL_ENV) else {
+        return DEFAULT_FUEL_BUDGET;
+    };
+
+    match raw.trim().parse::<u64>() {
+        Ok(0) => {
+            eprintln!(
+                "mcp-proxy: {WASM_FUEL_ENV}=0 would remove the extension execution bound; \
+                 using the default budget of {DEFAULT_FUEL_BUDGET}"
+            );
+            DEFAULT_FUEL_BUDGET
+        }
+        Ok(budget) => budget,
+        Err(_) => {
+            eprintln!(
+                "mcp-proxy: ignoring unparseable {WASM_FUEL_ENV}=`{raw}`; \
+                 using the default budget of {DEFAULT_FUEL_BUDGET}"
+            );
+            DEFAULT_FUEL_BUDGET
+        }
+    }
 }
 
 fn append_violation_log(state: &mut HostState, message: &str) -> Result<()> {
@@ -404,7 +458,7 @@ mod tests {
 "#;
 
     fn test_engine_with(wat: &str) -> WasmPolicyEngine {
-        let engine = Engine::default();
+        let engine = Engine::new(&metered_config()).expect("test engine should build");
         let module = Module::new(&engine, wat).expect("test module should compile");
         let mut linker = Linker::new(&engine);
         linker
@@ -434,7 +488,9 @@ mod tests {
         let engine = test_engine();
         let params = r#"{"name":"read_file","arguments":{"path":"/tmp/a"}}"#;
         assert_eq!(
-            engine.evaluate_tool_call("read_file", params).expect("evaluate"),
+            engine
+                .evaluate_tool_call("read_file", params)
+                .expect("evaluate"),
             WasmDecision::Allow
         );
     }
@@ -472,5 +528,40 @@ mod tests {
         let mut contents = String::new();
         file.read_to_string(&mut contents).expect("read log");
         assert!(contents.contains("blocked by wasm policy extension"));
+    }
+
+    const INFINITE_LOOP_WAT: &str = r#"
+(module
+  (import "env" "log_violation" (func $log_violation (param i32 i32)))
+  (import "env" "report_block" (func $report_block (param i32 i32)))
+  (import "env" "report_rewrite" (func $report_rewrite (param i32 i32)))
+  (memory (export "memory") 2)
+  (func (export "input_ptr") (result i32) i32.const 0)
+  (func (export "evaluate_policy") (param $len i32) (result i32)
+    (loop $forever (br $forever))
+    i32.const 0)
+)
+"#;
+
+    /// A policy extension must not be able to decide how long the host waits for it.
+    /// Before fuel metering this test would hang the suite rather than fail it.
+    #[test]
+    fn a_runaway_extension_exhausts_its_fuel_instead_of_hanging() {
+        let engine = test_engine_with(INFINITE_LOOP_WAT);
+        let params = r#"{"name":"read_file","arguments":{"path":"/tmp/a"}}"#;
+
+        let error = engine
+            .evaluate_tool_call("read_file", params)
+            .expect_err("a non-terminating extension must fail rather than run forever");
+
+        assert!(
+            format!("{error:#}").contains("fuel"),
+            "the failure must name the budget it exhausted: {error:#}"
+        );
+    }
+
+    #[test]
+    fn a_budget_of_zero_is_refused_rather_than_removing_the_bound() {
+        assert_eq!(resolve_fuel_budget(), DEFAULT_FUEL_BUDGET);
     }
 }

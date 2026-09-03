@@ -50,13 +50,9 @@ pub enum McpMessageType<'a> {
         params: Option<&'a RawValue>,
     },
     /// A JSON-RPC notification (no `id` field).
-    Notification {
-        method: String,
-    },
+    Notification { method: String },
     /// A JSON-RPC response (`result` or `error` present).
-    Response {
-        id: Value,
-    },
+    Response { id: Value },
     /// Non-JSON, empty, or structurally unrecognizable frame.
     Unknown,
 }

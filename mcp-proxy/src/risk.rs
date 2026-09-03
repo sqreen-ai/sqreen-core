@@ -40,8 +40,23 @@ pub const DEFAULT_RISK_THRESHOLD: u8 = 70;
 /// Environment variable override for the risk confirmation threshold.
 pub const RISK_THRESHOLD_ENV: &str = "MCP_RISK_THRESHOLD";
 
+/// Environment variable overriding the approval prompt deadline, in seconds.
+///
+/// `0` disables the deadline, restoring the pre-hardening behavior of waiting forever.
+pub const APPROVAL_TIMEOUT_ENV: &str = "SQREEN_APPROVAL_TIMEOUT_SECS";
+
+/// How long an approval prompt waits for an operator before giving up.
+///
+/// Long enough for someone to read the payload and think; short enough that an agent left
+/// running against a headless session does not hang forever holding an open prompt. Timing
+/// out denies — see [`prompt_user_confirmation`].
+pub const DEFAULT_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Replacement token written over redacted sensitive segments.
 pub const MASK_TOKEN: &str = "[MASKED_PII_BY_PROXY]";
+
+/// Replacement token written over secret-value DLP hits (API keys, tokens, PEMs, JWTs).
+pub const SECRET_MASK_TOKEN: &str = "[MASKED_SECRET_BY_PROXY]";
 
 /// Shannon entropy (bits/char) above which a sliding window is treated as obfuscated.
 const WINDOW_ENTROPY_THRESHOLD: f64 = 4.5;
@@ -61,6 +76,7 @@ const ENTROPY_WINDOW_STEP: usize = 16;
 const PII_RISK_BONUS: i32 = 30;
 const LUHN_RISK_BONUS: i32 = 40;
 const ENTROPY_RISK_BONUS: i32 = 20;
+const SECRET_RISK_BONUS: i32 = 45;
 
 static SSN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("valid SSN regex"));
@@ -68,14 +84,53 @@ static DB_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(?:postgres|mongodb|mysql)://[^\s"']+"#).expect("valid DB URL regex")
 });
 
+/// OpenAI / Anthropic / Google API key shapes.
+static OPENAI_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}\b").expect("valid openai key regex")
+});
+static GOOGLE_API_KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bAIza[0-9A-Za-z_-]{35}\b").expect("valid google api key regex"));
+static AWS_ACCESS_KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b").expect("valid aws access key"));
+static GITHUB_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b").expect("valid github token")
+});
+static SLACK_TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b").expect("valid slack token"));
+static PEM_PRIVATE_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----")
+        .expect("valid pem private key")
+});
+static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+        .expect("valid jwt regex")
+});
+
 /// Outcome of a single-pass risk analysis over tool-call parameters.
 ///
 /// `sanitized_params` is `Some` only when structural masking occurred; callers must
 /// rewrite the outbound JSON-RPC frame before forwarding.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RiskAnalysis {
     pub score: u8,
     pub sanitized_params: Option<String>,
+
+    /// The payload was not valid JSON, so it was scanned as raw text instead.
+    ///
+    /// The score is still meaningful but weaker: a flat text scan cannot attribute a
+    /// finding to a field, and cannot mask structurally. Reported rather than inferred so
+    /// the gateway can apply [`crate::gateway::Subsystem::RiskScoring`] instead of
+    /// treating a degraded score as an equal one.
+    pub degraded: bool,
+
+    /// The scanner decided the payload needed masking and could not produce the masked
+    /// form.
+    ///
+    /// The dangerous case: `sanitized_params` is `None` for the same reason it is `None`
+    /// when nothing needed masking, so without this flag "there was no secret" and "there
+    /// was a secret and we failed to mask it" are the same value. Handled by
+    /// [`crate::gateway::Subsystem::DlpScanner`], which fails closed.
+    pub masking_failed: bool,
 }
 
 /// Validates a numeric string (formatted or raw) with the Luhn checksum.
@@ -122,14 +177,24 @@ pub fn analyze_params(tool_name: &str, params_json: &str) -> RiskAnalysis {
     match serde_json::from_str::<Value>(params_json) {
         Ok(mut value) => {
             scan_value(&mut value, &mut score, &mut state);
-            let sanitized_params = if state.masked {
-                serde_json::to_string(&value).ok()
+
+            let (sanitized_params, masking_failed) = if state.masked {
+                match serde_json::to_string(&value) {
+                    Ok(masked) => (Some(masked), false),
+                    // The scanner found something and cannot hand back the masked bytes.
+                    // Reporting `None` here would be indistinguishable from "nothing to
+                    // mask" and would forward the secret.
+                    Err(_) => (None, true),
+                }
             } else {
-                None
+                (None, false)
             };
+
             RiskAnalysis {
                 score: score.clamp(0, 100) as u8,
                 sanitized_params,
+                degraded: false,
+                masking_failed,
             }
         }
         Err(_) => analyze_raw_params(params_json, score),
@@ -139,8 +204,19 @@ pub fn analyze_params(tool_name: &str, params_json: &str) -> RiskAnalysis {
 /// Prompts the local operator for manual confirmation via `/dev/tty` or stderr fallback.
 ///
 /// # Fail-closed invariant
-/// Any prompt failure, panic in the blocking task, or empty read defaults to **`false`
-/// (deny)** so high-risk frames never bypass operator review silently.
+/// Any prompt failure, panic in the blocking task, empty read, or expiry of the deadline
+/// defaults to **`false` (deny)** so high-risk frames never bypass operator review
+/// silently.
+///
+/// # Deadline
+/// The prompt waits at most [`DEFAULT_APPROVAL_TIMEOUT`], overridable through
+/// [`APPROVAL_TIMEOUT_ENV`]. Without a deadline an agent running against a session with no
+/// operator — a CI job, a detached daemon, a closed terminal — blocks on the prompt
+/// indefinitely, which presents as a hung agent rather than a denied action. Timing out
+/// denies, so the deadline can only make the gate stricter.
+///
+/// The blocking read is left running when the deadline expires rather than being
+/// cancelled: it owns a `/dev/tty` handle, and the answer is already discarded.
 ///
 /// # Threading model
 /// Blocking terminal I/O runs on the Tokio blocking pool; the stdio relay task awaits the
@@ -148,12 +224,29 @@ pub fn analyze_params(tool_name: &str, params_json: &str) -> RiskAnalysis {
 ///
 /// Returns `true` when the user presses `y`/`Y`, `false` for `n`/`N` or Enter.
 pub async fn prompt_user_confirmation(tool_name: &str, score: u8, payload: &str) -> bool {
-    let tool_name = tool_name.to_string();
+    let label = tool_name.to_string();
+    let owned_tool = tool_name.to_string();
     let payload = payload.to_string();
 
-    match tokio::task::spawn_blocking(move || prompt_user_confirmation_sync(&tool_name, score, &payload))
-        .await
-    {
+    let prompt = tokio::task::spawn_blocking(move || {
+        prompt_user_confirmation_sync(&owned_tool, score, &payload)
+    });
+
+    let settled = match resolve_approval_timeout() {
+        Some(deadline) => match tokio::time::timeout(deadline, prompt).await {
+            Ok(settled) => settled,
+            Err(_) => {
+                eprintln!(
+                    "mcp-proxy: risk prompt for `{label}` timed out after {}s; defaulting to deny",
+                    deadline.as_secs()
+                );
+                return false;
+            }
+        },
+        None => prompt.await,
+    };
+
+    match settled {
         Ok(Ok(approved)) => approved,
         Ok(Err(error)) => {
             eprintln!("mcp-proxy: risk prompt failed ({error:#}); defaulting to deny");
@@ -166,11 +259,46 @@ pub async fn prompt_user_confirmation(tool_name: &str, score: u8, payload: &str)
     }
 }
 
+/// Resolves the approval deadline, or `None` when the operator disabled it.
+pub fn resolve_approval_timeout_public() -> Option<std::time::Duration> {
+    resolve_approval_timeout()
+}
+
+/// Resolves the approval deadline, or `None` when the operator disabled it.
+fn resolve_approval_timeout() -> Option<std::time::Duration> {
+    let Ok(raw) = std::env::var(APPROVAL_TIMEOUT_ENV) else {
+        return Some(DEFAULT_APPROVAL_TIMEOUT);
+    };
+
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        Err(_) => {
+            eprintln!(
+                "mcp-proxy: ignoring unparseable {APPROVAL_TIMEOUT_ENV}=`{raw}`; \
+                 using the {}s default",
+                DEFAULT_APPROVAL_TIMEOUT.as_secs()
+            );
+            Some(DEFAULT_APPROVAL_TIMEOUT)
+        }
+    }
+}
+
 /// Resolves the active risk threshold from policy config or environment.
+/// An unparseable override is reported rather than ignored: silently falling back leaves
+/// an operator who typed `MCP_RISK_THRESHOLD=1O` believing they tightened the gate when
+/// they restored the default.
 pub fn resolve_risk_threshold(configured: Option<u8>) -> u8 {
     if let Ok(raw) = std::env::var(RISK_THRESHOLD_ENV) {
-        if let Ok(parsed) = raw.parse::<u8>() {
-            return parsed;
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            match trimmed.parse::<u8>() {
+                Ok(parsed) => return parsed,
+                Err(_) => eprintln!(
+                    "mcp-proxy: ignoring unparseable {RISK_THRESHOLD_ENV}=`{raw}`; \
+                     falling back to the policy threshold (expected 0-100)"
+                ),
+            }
         }
     }
 
@@ -187,22 +315,22 @@ pub struct SecurityLayerEvaluation {
 
 /// Merges IOC and behavioral detections into a single gate/score decision.
 ///
-/// IOC matches clamp to [`crate::threat_intel::IOC_BLOCK_SCORE`] (unconditional
-/// block in the risk pipeline). Behavioral chains clamp to 100 and force the gate.
+/// Either signal forces the `/dev/tty` confirmation gate. IOC matches add
+/// [`crate::threat_intel::IOC_RISK_PENALTY`]; behavioral chains clamp to 100.
 pub fn apply_security_layers(
     base_score: u8,
     ioc_match: bool,
     behavioral_anomaly: bool,
 ) -> SecurityLayerEvaluation {
     use crate::behavior::TELEMETRY_BEHAVIORAL_CHAIN;
-    use crate::threat_intel::{IOC_BLOCK_SCORE, TELEMETRY_IOC_MATCH};
+    use crate::threat_intel::{IOC_RISK_PENALTY, TELEMETRY_IOC_MATCH};
 
     let mut score = base_score;
     let mut force_gate = false;
     let mut marker = None;
 
     if ioc_match {
-        score = IOC_BLOCK_SCORE;
+        score = score.saturating_add(IOC_RISK_PENALTY).min(100);
         force_gate = true;
         marker = Some(TELEMETRY_IOC_MATCH);
     }
@@ -226,6 +354,7 @@ struct ScanState {
     pii_detected: bool,
     luhn_detected: bool,
     entropy_detected: bool,
+    secret_detected: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -233,12 +362,13 @@ struct StringScanFlags {
     pii: bool,
     luhn: bool,
     entropy: bool,
+    secret: bool,
     masked: bool,
 }
 
 impl StringScanFlags {
     fn any_signal(self) -> bool {
-        self.pii || self.luhn || self.entropy
+        self.pii || self.luhn || self.entropy || self.secret
     }
 }
 
@@ -250,11 +380,9 @@ fn analyze_raw_params(params_json: &str, base_score: i32) -> RiskAnalysis {
     apply_string_flags(flags, &mut score, &mut state);
     RiskAnalysis {
         score: score.clamp(0, 100) as u8,
-        sanitized_params: if state.masked {
-            Some(sanitized)
-        } else {
-            None
-        },
+        sanitized_params: if state.masked { Some(sanitized) } else { None },
+        degraded: true,
+        masking_failed: false,
     }
 }
 
@@ -295,9 +423,79 @@ fn apply_string_flags(flags: StringScanFlags, score: &mut i32, state: &mut ScanS
         *score += ENTROPY_RISK_BONUS;
         state.entropy_detected = true;
     }
+    if flags.secret && !state.secret_detected {
+        *score += SECRET_RISK_BONUS;
+        state.secret_detected = true;
+    }
     if flags.masked {
         state.masked = true;
     }
+}
+
+/// Masks known secret-value patterns in arbitrary text (request or response bodies).
+///
+/// Returns `(masked_text, true)` when at least one secret segment was replaced with
+/// [`SECRET_MASK_TOKEN`].
+pub fn mask_secrets_in_text(text: &str) -> (String, bool) {
+    let (sanitized, flags) = mask_secret_patterns(text);
+    if flags.secret || flags.masked {
+        (sanitized, true)
+    } else {
+        (text.to_string(), false)
+    }
+}
+
+/// Applies secret-value DLP to a UTF-8 JSON (or plain) byte frame.
+///
+/// Returns `Some(rewritten)` when masking occurred; `None` when the frame is clean
+/// or not valid UTF-8.
+pub fn mask_secrets_in_frame(frame: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(frame).ok()?;
+    match serde_json::from_str::<Value>(text) {
+        Ok(mut value) => {
+            let mut score = 0;
+            let mut state = ScanState::default();
+            scan_value(&mut value, &mut score, &mut state);
+            if state.masked {
+                Some(value.to_string().into_bytes())
+            } else {
+                None
+            }
+        }
+        Err(_) => {
+            let (masked, changed) = mask_secrets_in_text(text);
+            if changed {
+                Some(masked.into_bytes())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn mask_secret_patterns(text: &str) -> (String, StringScanFlags) {
+    let mut flags = StringScanFlags::default();
+    let mut current = text.to_string();
+
+    let replacements: [(&LazyLock<Regex>, &str); 7] = [
+        (&OPENAI_KEY_RE, SECRET_MASK_TOKEN),
+        (&GOOGLE_API_KEY_RE, SECRET_MASK_TOKEN),
+        (&AWS_ACCESS_KEY_RE, SECRET_MASK_TOKEN),
+        (&GITHUB_TOKEN_RE, SECRET_MASK_TOKEN),
+        (&SLACK_TOKEN_RE, SECRET_MASK_TOKEN),
+        (&PEM_PRIVATE_KEY_RE, SECRET_MASK_TOKEN),
+        (&JWT_RE, SECRET_MASK_TOKEN),
+    ];
+
+    for (regex, token) in replacements {
+        if regex.is_match(&current) {
+            current = regex.replace_all(&current, token).into_owned();
+            flags.secret = true;
+            flags.masked = true;
+        }
+    }
+
+    (current, flags)
 }
 
 fn scan_string(text: &str) -> (String, StringScanFlags) {
@@ -307,6 +505,13 @@ fn scan_string(text: &str) -> (String, StringScanFlags) {
 
     let mut flags = StringScanFlags::default();
     let mut current = text.to_string();
+
+    let (secret_sanitized, secret_flags) = mask_secret_patterns(&current);
+    if secret_flags.any_signal() || secret_flags.masked {
+        current = secret_sanitized;
+        flags.secret |= secret_flags.secret;
+        flags.masked |= secret_flags.masked;
+    }
 
     if SSN_RE.is_match(&current) {
         current = SSN_RE.replace_all(&current, MASK_TOKEN).into_owned();
@@ -354,14 +559,21 @@ fn string_needs_scan(text: &str) -> bool {
 
     text.contains('-')
         || text.contains("://")
+        || text.contains("sk-")
+        || text.contains("AKIA")
+        || text.contains("ASIA")
+        || text.contains("AIza")
+        || text.contains("ghp_")
+        || text.contains("gho_")
+        || text.contains("xox")
+        || text.contains("BEGIN ")
+        || text.contains("eyJ")
         || text.len() >= MIN_ENTROPY_STRING_LEN
         || text.bytes().any(|byte| byte.is_ascii_digit())
 }
 
 fn contains_db_scheme(text: &str) -> bool {
-    text.contains("postgres://")
-        || text.contains("mongodb://")
-        || text.contains("mysql://")
+    text.contains("postgres://") || text.contains("mongodb://") || text.contains("mysql://")
 }
 
 fn luhn_checksum(digits: &[u8]) -> bool {
@@ -426,7 +638,9 @@ fn read_card_candidate(chars: &[(usize, char)], start: usize) -> Option<(usize, 
             continue;
         }
 
-        if (ch == '-' || ch == ' ') && index + 1 < chars.len() && chars[index + 1].1.is_ascii_digit()
+        if (ch == '-' || ch == ' ')
+            && index + 1 < chars.len()
+            && chars[index + 1].1.is_ascii_digit()
         {
             index += 1;
             continue;
@@ -475,9 +689,7 @@ fn sliding_entropy_detected(text: &str) -> bool {
     if chars.len() >= MIN_WINDOW_SCAN_LEN {
         let mut start = 0;
         while start + ENTROPY_WINDOW_SIZE <= chars.len() {
-            let window: String = chars[start..start + ENTROPY_WINDOW_SIZE]
-                .iter()
-                .collect();
+            let window: String = chars[start..start + ENTROPY_WINDOW_SIZE].iter().collect();
             if shannon_entropy(&window) >= WINDOW_ENTROPY_THRESHOLD {
                 return true;
             }
@@ -486,8 +698,7 @@ fn sliding_entropy_detected(text: &str) -> bool {
         return false;
     }
 
-    chars.len() >= MIN_ENTROPY_STRING_LEN
-        && shannon_entropy(text) >= WINDOW_ENTROPY_THRESHOLD
+    chars.len() >= MIN_ENTROPY_STRING_LEN && shannon_entropy(text) >= WINDOW_ENTROPY_THRESHOLD
 }
 
 fn mask_high_entropy_windows(text: &str) -> (String, bool) {
@@ -502,9 +713,7 @@ fn mask_high_entropy_windows(text: &str) -> (String, bool) {
     if chars.len() >= MIN_WINDOW_SCAN_LEN {
         let mut start = 0;
         while start + ENTROPY_WINDOW_SIZE <= chars.len() {
-            let window: String = chars[start..start + ENTROPY_WINDOW_SIZE]
-                .iter()
-                .collect();
+            let window: String = chars[start..start + ENTROPY_WINDOW_SIZE].iter().collect();
             if shannon_entropy(&window) >= WINDOW_ENTROPY_THRESHOLD {
                 ranges.push((start, start + ENTROPY_WINDOW_SIZE));
             }
@@ -625,7 +834,9 @@ fn read_yes_no(reader: &mut impl Read) -> Result<bool> {
     let mut buffer = [0_u8; 8];
 
     loop {
-        let read = reader.read(&mut buffer).context("failed to read user confirmation")?;
+        let read = reader
+            .read(&mut buffer)
+            .context("failed to read user confirmation")?;
         if read == 0 {
             return Ok(false);
         }
@@ -670,7 +881,11 @@ fn render_warning_box(tool_name: &str, score: u8, payload: &str) -> String {
 
     for line in lines {
         for wrapped in wrap_line(&line, inner_width - 2) {
-            output.push_str(&format!("║ {:<width$} ║\n", wrapped, width = inner_width - 2));
+            output.push_str(&format!(
+                "║ {:<width$} ║\n",
+                wrapped,
+                width = inner_width - 2
+            ));
         }
     }
 
@@ -725,7 +940,10 @@ mod tests {
 
     #[test]
     fn assigns_base_risk_by_tool_family() {
-        assert_eq!(calculate_risk_score("read_file", r#"{"arguments":{"path":"/tmp/a"}}"#), 20);
+        assert_eq!(
+            calculate_risk_score("read_file", r#"{"arguments":{"path":"/tmp/a"}}"#),
+            20
+        );
         assert_eq!(
             calculate_risk_score("execute_bash", r#"{"arguments":{"command":"ls"}}"#),
             75
@@ -735,8 +953,11 @@ mod tests {
     #[test]
     fn spikes_risk_for_high_entropy_strings() {
         let low = r#"{"arguments":{"command":"ls -la"}}"#;
-        let high = r#"{"arguments":{"token":"YWJjZEFCRWZjR0hnSUlqa0xNTm9QUVJTVFVWV1hZWjAxMjM0NTY3ODk="}}"#;
-        assert!(calculate_risk_score("read_file", high) >= calculate_risk_score("read_file", low) + 15);
+        let high =
+            r#"{"arguments":{"token":"YWJjZEFCRWZjR0hnSUlqa0xNTm9QUVJTVFVWV1hZWjAxMjM0NTY3ODk="}}"#;
+        assert!(
+            calculate_risk_score("read_file", high) >= calculate_risk_score("read_file", low) + 15
+        );
     }
 
     #[test]
@@ -794,9 +1015,48 @@ mod tests {
     }
 
     #[test]
+    fn masks_openai_style_api_keys() {
+        let params = r#"{"arguments":{"token":"sk-proj-abcdefghijklmnopqrstuvwxyz012345"}}"#;
+        let analysis = analyze_params("fetch", params);
+        let sanitized = analysis.sanitized_params.expect("should mask");
+        assert!(sanitized.contains(SECRET_MASK_TOKEN));
+        assert!(!sanitized.contains("sk-proj-"));
+        assert!(analysis.score >= 45 + SECRET_RISK_BONUS as u8);
+    }
+
+    #[test]
+    fn masks_github_and_aws_access_keys() {
+        let params = r#"{"arguments":{"gh":"ghp_abcdefghijklmnopqrstuvwxyz0123456789AB","aws":"AKIAIOSFODNN7EXAMPLE"}}"#;
+        let (masked, changed) = mask_secrets_in_text(params);
+        assert!(changed);
+        assert!(masked.contains(SECRET_MASK_TOKEN));
+        assert!(!masked.contains("ghp_"));
+        assert!(!masked.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn masks_jwt_and_pem_headers() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepad";
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----";
+        let (jwt_masked, jwt_hit) = mask_secrets_in_text(jwt);
+        let (pem_masked, pem_hit) = mask_secrets_in_text(pem);
+        assert!(jwt_hit);
+        assert!(pem_hit);
+        assert!(jwt_masked.contains(SECRET_MASK_TOKEN));
+        assert!(pem_masked.contains(SECRET_MASK_TOKEN));
+    }
+
+    #[test]
+    fn short_non_secret_strings_are_not_masked() {
+        let (masked, changed) = mask_secrets_in_text("hello-world");
+        assert!(!changed);
+        assert_eq!(masked, "hello-world");
+    }
+
+    #[test]
     fn security_layers_force_gate_on_ioc() {
         let eval = apply_security_layers(20, true, false);
-        assert_eq!(eval.effective_score, 100);
+        assert_eq!(eval.effective_score, 70);
         assert!(eval.force_confirmation_gate);
         assert_eq!(eval.telemetry_marker, Some("THREAT_INTEL_IOC_MATCH"));
     }

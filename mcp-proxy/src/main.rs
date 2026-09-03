@@ -1,67 +1,16 @@
 //! # mcp-proxy
 //!
-//! A local-first, transparent stdio proxy for MCP (Model Context Protocol) traffic.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! Client (IDE) ──stdin/stdout──► mcp-proxy ──stdin/stdout──► MCP server
-//!                                    │
-//!                                    ├─ peeker (zero-copy classify)
-//!                                    ├─ YAML policy engine
-//!                                    ├─ Wasm sandbox extension
-//!                                    ├─ DLP / risk gate (/dev/tty)
-//!                                    └─ optional cloud sync + telemetry
-//! ```
-//!
-//! ## Concurrency and thread safety
-//!
-//! - Two independent Tokio tasks relay client→server and server→client; when either leg
-//!   ends (client stdin closed or downstream stdout EOF), the other is aborted so the
-//!   process does not hang after a one-shot MCP server exits.
-//! - A [`Mutex`] serializes writes to the debug log file across both directions.
-//! - Policy engines are immutable after startup (`Arc<PolicyEngine>`); cloud policy refresh
-//!   occurs at boot (future: background sync).
-//! - Telemetry dispatch uses `tokio::spawn` — **never blocks** the active relay task.
-//!
-//! ## Fail-closed invariants
-//!
-//! 1. Policy **Block** returns a JSON-RPC error to the client without forwarding.
-//! 2. Risk gate denial returns `-32003` access denied when the operator rejects a call.
-//! 3. Risk prompt or cloud failures default to deny or local fallback — never silent allow.
-//! 4. Invalid JSON-RPC peek failures still forward (passthrough) to avoid breaking unknown
-//!    extensions; policy hooks only run on successfully classified `tools/call` requests.
-//!
-//! ## Zero-copy lifetime boundaries
-//!
-//! [`peeker::peek_envelope`] borrows `params` from the in-memory frame buffer. Policy
-//! inspection must finish before the frame is rewritten or forwarded. See `peeker.rs`.
+//! Local-first runtime security for MCP stdio and OpenAI-compatible HTTP agent traffic.
 //!
 //! ## Usage
 //!
 //! ```text
+//! mcp-proxy demo
+//! mcp-proxy --help
+//! mcp-proxy --version
 //! mcp-proxy -- run <command> [args...]
-//!
-//! # Example
-//! mcp-proxy -- run node /path/to/mcp-server.js
+//! mcp-proxy serve [--listen 127.0.0.1:8787] [--upstream https://api.openai.com]
 //! ```
-//!
-//! ## Environment
-//!
-//! - `MCP_PROXY_LOG`: Optional path to the debug log file. Defaults to `mcp-proxy.log`
-//!   in the current working directory.
-//! - `MCP_POLICY_PATH`: Declarative YAML policy file path.
-//! - `MCP_WASM_POLICY`: Optional `.wasm` policy extension module.
-//! - `MCP_CONTROL_PLANE_URL` / `MCP_DEVICE_TOKEN`: Optional cloud policy + telemetry sync.
-
-mod peeker;
-mod risk;
-mod policy;
-mod policy_store;
-mod wasm_engine;
-mod cloud_client;
-mod threat_intel;
-mod behavior;
 
 use std::env;
 use std::path::PathBuf;
@@ -69,31 +18,70 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use behavior::SessionTracker;
-use cloud_client::{CloudClient, TelemetryRecord, UserDecision};
-use peeker::{format_peek_summary, peek_envelope, McpMessageType};
-use policy::{
-    access_denied_response, blocked_response,
-    rewrite_tools_call_frame, PolicyEngine, PolicyVerdict,
+use mcp_proxy::adapters::{
+    McpAdapter, McpDenyStyle, McpEffect, McpToolsCall, NormalizationContext, RuntimeAdapter,
+    ToolCallAdapter,
 };
-use policy_store::{load_policy_engine, PolicyStore};
-use risk::{
-    analyze_params, apply_security_layers, calculate_risk_score, prompt_user_confirmation,
-    resolve_risk_threshold,
-};
-use threat_intel::{load_threat_intel_matcher, ThreatIntelMatcher, ThreatIntelStore};
+use mcp_proxy::behavior::SessionTracker;
+use mcp_proxy::cloud_client::CloudClient;
+use mcp_proxy::demo::run_first_block_demo;
+use mcp_proxy::gateway::{sanitize_detail, sanitize_error, FailurePolicy, Subsystem};
+use mcp_proxy::guard::{evaluate_outcome, GuardContext};
+use mcp_proxy::http_serve::{run_agent_firewall_with_stores, sanitize_server_frame, ServeConfig};
+use mcp_proxy::peeker::{format_peek_summary, peek_envelope, McpMessageType};
+use mcp_proxy::policy::{access_denied_response, blocked_response, rewrite_tools_call_frame};
+use mcp_proxy::policy_store::{load_policy_engine, PolicyStore};
+use mcp_proxy::risk::mask_secrets_in_frame;
+use mcp_proxy::threat_intel::{load_threat_intel_matcher, ThreatIntelStore};
+use mcp_proxy::wasm_engine::{WasmPolicyEngine, WASM_POLICY_ENV};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use wasm_engine::{parse_tool_name, WasmDecision, WasmPolicyEngine, WASM_POLICY_ENV};
 
 /// Default filename for the local debug trace log.
 const DEFAULT_LOG_FILE: &str = "mcp-proxy.log";
 
 /// Environment variable used to override the debug log path.
 const LOG_PATH_ENV: &str = "MCP_PROXY_LOG";
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn print_help() {
+    println!(
+        "\
+mcp-proxy {VERSION} — security layer for AI agent tool calls
+
+Usage:
+  mcp-proxy demo
+  mcp-proxy -- run <command> [args...]
+  mcp-proxy serve [--listen ADDR] [--upstream URL]
+  mcp-proxy --help
+  mcp-proxy --version
+
+Commands:
+  demo     Safe first-run demo: allow one action, block a sensitive path, explain why
+  serve    HTTP proxy for OpenAI-compatible (and Anthropic-shaped) agent tool traffic
+  -- run   Wrap an MCP stdio server (used by Cursor / Claude Desktop)
+
+Examples:
+  source ~/.config/mcp-proxy/env
+  mcp-proxy demo
+
+  mcp-proxy -- run npx -y @modelcontextprotocol/server-filesystem .
+
+  mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.openai.com
+  export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+
+Policy:
+  MCP_POLICY_PATH   Override policy file (default: ./mcp-policy.yaml or ~/.config/mcp-proxy/mcp-policy.yaml)
+
+Uninstall:
+  See README — restore IDE mcp.json from .bak.* and remove ~/.local/bin/mcp-proxy
+"
+    );
+}
 
 /// Parsed CLI invocation describing the downstream MCP server command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,13 +90,25 @@ struct RunCommand {
     args: Vec<String>,
 }
 
+/// Top-level CLI mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CliMode {
+    Help,
+    Version,
+    Demo,
+    Run(RunCommand),
+    Serve {
+        listen: Option<String>,
+        upstream: Option<String>,
+    },
+}
+
 /// Thread-safe append-only debug logger shared by both relay tasks.
 struct DebugLogger {
     file: Mutex<tokio::fs::File>,
 }
 
 impl DebugLogger {
-    /// Opens (or creates) the debug log file for append-only writes.
     async fn open(path: PathBuf) -> Result<Self> {
         let file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -122,13 +122,23 @@ impl DebugLogger {
         })
     }
 
-    /// Writes a direction-tagged UTF-8 frame to the debug log.
+    /// Appends a relay frame, with secret values masked.
+    ///
+    /// The debug log is on by default and holds every frame in both directions, which
+    /// makes it the largest secret sink in the process: a proxy whose purpose is stopping
+    /// credential egress was writing every credential it saw to a world-readable file next
+    /// to the policy. Frames go through the same DLP scanner that protects payloads, so
+    /// the log keeps its diagnostic value — shapes, sizes, tool names, structure — without
+    /// keeping the secrets.
     async fn log_bytes(&self, direction: &str, frame: &[u8]) -> Result<()> {
+        let masked = mask_secrets_in_frame(frame);
+        let body = masked.as_deref().unwrap_or(frame);
+
         let mut file = self.file.lock().await;
         file.write_all(format!("[{direction}] ").as_bytes())
             .await
             .context("failed to write debug log prefix")?;
-        file.write_all(frame)
+        file.write_all(body)
             .await
             .context("failed to write debug log frame")?;
         file.write_all(b"\n")
@@ -138,7 +148,6 @@ impl DebugLogger {
         Ok(())
     }
 
-    /// Writes a structured envelope inspection summary to the debug log.
     async fn log_inspection(&self, direction: &str, summary: &str) -> Result<()> {
         let mut file = self.file.lock().await;
         file.write_all(format!("[{direction}] {summary}\n").as_bytes())
@@ -147,20 +156,47 @@ impl DebugLogger {
         file.flush().await.context("failed to flush debug log")?;
         Ok(())
     }
+
+    /// Records to the debug log without letting a logging failure reach the caller.
+    ///
+    /// Diagnostics must not be able to stop traffic. A full disk, a rotated-away file, or
+    /// a permissions change used to propagate out of the relay loop and terminate the
+    /// connection — turning a logging problem into an agent outage, which is both worse
+    /// than the problem and the kind of failure operators resolve by uninstalling the
+    /// proxy. Enforcement does not read this log, so losing it costs forensics, not
+    /// protection.
+    async fn record(&self, direction: &str, frame: &[u8], summary: &str) {
+        if let Err(error) = self.log_bytes(direction, frame).await {
+            warn_once_per_kind("debug log frame", &error);
+        }
+
+        if let Err(error) = self.log_inspection(direction, summary).await {
+            warn_once_per_kind("debug log inspection", &error);
+        }
+    }
 }
 
-/// Strips trailing `\n` / `\r` delimiters from a `read_until` buffer in place.
+/// Reports a degraded-diagnostics condition at most once, to avoid a log-failure loop
+/// filling stderr at the rate of the traffic it failed to record.
+fn warn_once_per_kind(what: &str, error: &anyhow::Error) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "mcp-proxy: {what} unavailable ({}); continuing to enforce without it",
+            mcp_proxy::gateway::sanitize_error(error)
+        );
+    }
+}
+
 fn strip_line_delimiter(buffer: &mut Vec<u8>) {
     while matches!(buffer.last(), Some(b'\n') | Some(b'\r')) {
         buffer.pop();
     }
 }
 
-/// Forwards a raw frame slice to a stream without converting to `String`.
-async fn forward_frame(
-    writer: &mut (impl AsyncWriteExt + Unpin),
-    frame: &[u8],
-) -> Result<()> {
+async fn forward_frame(writer: &mut (impl AsyncWriteExt + Unpin), frame: &[u8]) -> Result<()> {
     writer
         .write_all(frame)
         .await
@@ -169,17 +205,18 @@ async fn forward_frame(
         .write_all(b"\n")
         .await
         .context("failed to write frame delimiter")?;
-    writer.flush().await.context("failed to flush relay stream")?;
+    writer
+        .flush()
+        .await
+        .context("failed to flush relay stream")?;
     Ok(())
 }
 
-/// Snapshot of client-side policy inputs extracted before frame mutation.
 struct ClientPolicyInput {
     request_id: Value,
     tools_call_params: String,
 }
 
-/// Peeks at a frame, logs classification metadata, and forwards the original bytes.
 async fn inspect_and_relay(
     logger: &DebugLogger,
     direction: &str,
@@ -187,22 +224,17 @@ async fn inspect_and_relay(
     downstream_writer: &mut (impl AsyncWriteExt + Unpin),
     client_writer: Option<&mut (impl AsyncWriteExt + Unpin)>,
     policy_store: &PolicyStore,
-    wasm_policy: Option<&WasmPolicyEngine>,
+    guard_base: &GuardContext,
     cloud_client: Option<&CloudClient>,
     threat_intel_store: &ThreatIntelStore,
-    session_tracker: &SessionTracker,
+    normalization: &NormalizationContext,
 ) -> Result<()> {
-    logger
-        .log_bytes(direction, frame)
-        .await
-        .context("failed to record relay debug log entry")?;
-
-    let (summary, client_policy_input, peek_failed) = {
+    let (summary, client_policy_input, peek_error) = {
         let classification = peek_envelope(frame);
         let summary = classification
             .as_ref()
             .map(format_peek_summary)
-            .unwrap_or_else(|error| format!("peek error: {error:#}"));
+            .unwrap_or_else(|error| format!("peek error: {}", sanitize_error(error)));
 
         let client_policy_input = match (&classification, direction) {
             (
@@ -220,455 +252,281 @@ async fn inspect_and_relay(
             _ => None,
         };
 
-        let _use_fast_path = classification
-            .as_ref()
-            .map(|value| value.is_fast_path())
-            .unwrap_or(false);
-        let peek_failed = classification.is_err();
+        let peek_error = classification.as_ref().err().map(sanitize_error);
 
-        (summary, client_policy_input, peek_failed)
+        (summary, client_policy_input, peek_error)
     };
 
-    logger
-        .log_inspection(direction, &summary)
-        .await
-        .context("failed to record envelope inspection log entry")?;
+    logger.record(direction, frame, &summary).await;
 
     if let Some(input) = client_policy_input {
-        policy_store
-            .refresh_if_stale(cloud_client)
-            .await;
-        threat_intel_store
-            .refresh_if_stale(cloud_client)
-            .await;
+        policy_store.refresh_if_stale(cloud_client).await;
+        threat_intel_store.refresh_if_stale(cloud_client).await;
+
         let policy = policy_store.snapshot();
-        let threat_intel = threat_intel_store.snapshot();
+        let threat_intel = Arc::new(threat_intel_store.snapshot());
+        let ctx = GuardContext {
+            policy: policy.clone(),
+            policy_availability: policy_store.availability(),
+            wasm: guard_base.wasm.clone(),
+            threat_intel,
+            session: Arc::clone(&guard_base.session),
+            cloud: guard_base.cloud.clone(),
+        };
 
-        if let Some(outcome) = apply_yaml_policy(
-            policy.as_deref(),
-            cloud_client,
-            &input,
-            frame,
-            logger,
-            direction,
-        )
-        .await?
-        {
-            return finish_policy_outcome(
-                outcome,
-                downstream_writer,
-                client_writer,
-            )
-            .await;
-        }
+        let request_id = match &input.request_id {
+            Value::String(id) => Some(id.clone()),
+            Value::Number(id) => Some(id.to_string()),
+            _ => None,
+        };
 
-        if let Some(outcome) =
-            apply_wasm_policy(wasm_policy, cloud_client, &input, frame, logger, direction).await?
-        {
-            return finish_policy_outcome(
-                outcome,
-                downstream_writer,
-                client_writer,
-            )
-            .await;
-        }
+        // A `tools/call` the adapter cannot normalize is a malformed request, and the
+        // failure matrix says a request nobody can parse is a request nobody can clear.
+        // Previously this `?` aborted the relay task, which killed the agent's connection
+        // rather than answering the one bad call — safe, but indistinguishable from a
+        // crash. Now the caller gets a JSON-RPC error and the session survives.
+        let wire =
+            McpToolsCall::stdio(&input.tools_call_params).with_request_id(request_id.as_deref());
+        let action = match McpAdapter::decode(normalization, wire) {
+            Ok(action) => action,
+            Err(error) => {
+                let detail = sanitize_detail(&error.to_string());
+                let mode = FailurePolicy::from_env().mode_for(Subsystem::Normalization);
 
-        if let Some(outcome) = apply_risk_pipeline(
-            policy.as_deref(),
-            cloud_client,
-            &threat_intel,
-            session_tracker,
-            &input,
-            frame,
-            logger,
-            direction,
-        )
-        .await?
-        {
-            return finish_risk_outcome(outcome, frame, downstream_writer, client_writer).await;
-        }
-    }
+                eprintln!(
+                    "mcp-proxy: security control degraded [{}={mode}] {detail}",
+                    Subsystem::Normalization
+                );
+                logger
+                    .record(direction, frame, &format!("normalization failed: {detail}"))
+                    .await;
 
-    if direction == "Server -> Client" {
-        if let Some(policy) = policy_store.snapshot() {
-            if let Some(bytes) = apply_server_policy(Some(policy.as_ref()), frame) {
-                forward_frame(downstream_writer, &bytes).await?;
+                if mode.permits_allow() {
+                    forward_frame(downstream_writer, frame).await?;
+                    return Ok(());
+                }
+
+                let response_writer = client_writer
+                    .context("client writer unavailable for malformed-request response")?;
+                let response = blocked_response(
+                    &input.request_id,
+                    &format!("request could not be normalized for evaluation: {detail}"),
+                );
+
+                forward_frame(response_writer, &response).await?;
+                return Ok(());
+            }
+        };
+
+        let outcome = evaluate_outcome(&ctx, &action).await;
+        let record = mcp_proxy::adapters::AdapterExecutionRecord::from_evaluation(
+            McpAdapter::ADAPTER_ID,
+            &action,
+            &outcome,
+        );
+        let effect =
+            McpAdapter::enforce(&wire, &action, &outcome).unwrap_or_else(|_| McpEffect::Block {
+                reason: "adapter enforcement failed".to_string(),
+                style: McpDenyStyle::AccessDenied,
+            });
+        McpAdapter::emit_outcome(&record);
+
+        match effect {
+            McpEffect::Block { reason, style } => {
+                logger
+                    .record(direction, frame, &format!("guard block: {reason}"))
+                    .await;
+
+                let response_writer =
+                    client_writer.context("client writer unavailable for blocked response")?;
+
+                let response = match style {
+                    McpDenyStyle::RuleProhibition => blocked_response(&input.request_id, &reason),
+                    McpDenyStyle::AccessDenied => {
+                        access_denied_response(&input.request_id, &reason)
+                    }
+                };
+
+                forward_frame(response_writer, &response).await?;
+                return Ok(());
+            }
+            McpEffect::Forward {
+                rewritten_params_json,
+            } => {
+                if let Some(rewritten) = rewritten_params_json {
+                    // A rewrite that cannot be re-framed must not fall through to forwarding the
+                    // original: the original is the payload the rewrite existed to replace.
+                    match rewrite_tools_call_frame(frame, rewritten.as_bytes()) {
+                        Ok(new_frame) => {
+                            *frame = new_frame;
+                            logger
+                                .record(
+                                    direction,
+                                    frame,
+                                    "guard: forwarded rewritten tools/call params",
+                                )
+                                .await;
+                        }
+                        Err(error) => {
+                            let detail = sanitize_error(&error);
+                            eprintln!(
+                                "mcp-proxy: security control degraded [{}=FAIL_CLOSED] \
+                                 could not apply rewritten arguments: {detail}",
+                                Subsystem::PolicyEngine
+                            );
+
+                            let response_writer = client_writer.context(
+                                "client writer unavailable for rewrite-failure response",
+                            )?;
+                            let response = blocked_response(
+                                &input.request_id,
+                                "sanitized arguments could not be applied to the request",
+                            );
+
+                            forward_frame(response_writer, &response).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+
+                forward_frame(downstream_writer, frame).await?;
                 return Ok(());
             }
         }
     }
 
-    if peek_failed {
-        forward_frame(downstream_writer, frame).await?;
-        return Ok(());
+    if direction == "Server -> Client" {
+        if let Some(bytes) = sanitize_server_frame(policy_store.snapshot().as_deref(), frame) {
+            forward_frame(downstream_writer, &bytes).await?;
+            return Ok(());
+        }
+    }
+
+    // A frame the envelope parser could not read.
+    //
+    // Forwarding it — the previous behavior — is a parser-differential bypass: `mcp-proxy`
+    // declines to inspect exactly the frames a downstream server may still accept, so
+    // "make the proxy's parser fail" becomes a way to skip policy entirely.
+    //
+    // Only the client direction is gated. A server response is not an agent action, and
+    // dropping it would break the client for a frame that carries no request to evaluate.
+    if let Some(detail) = peek_error {
+        if direction == "Client -> Server" {
+            let mode = FailurePolicy::from_env().mode_for(Subsystem::Normalization);
+
+            if !mode.permits_allow() {
+                eprintln!(
+                    "mcp-proxy: security control degraded [{}={mode}] \
+                     unparseable client frame withheld: {detail}",
+                    Subsystem::Normalization
+                );
+
+                if let Some(response_writer) = client_writer {
+                    // `id: null` per JSON-RPC: the frame's id is exactly what could not be
+                    // read, so there is nothing honest to correlate against.
+                    let response = blocked_response(
+                        &Value::Null,
+                        "request could not be parsed for evaluation",
+                    );
+                    forward_frame(response_writer, &response).await?;
+                }
+
+                return Ok(());
+            }
+        }
     }
 
     forward_frame(downstream_writer, frame).await?;
     Ok(())
 }
 
-enum PolicyOutcome {
-    Blocked { id: Value, reason: String },
-    Forward(Vec<u8>),
-}
+/// Parses CLI: `demo` | `serve …` | `-- run …` | help/version.
+fn parse_cli(argv: &[String]) -> Result<CliMode> {
+    let args: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
 
-enum RiskOutcome {
-    Denied { id: Value, reason: String },
-    Approved,
-}
-
-async fn finish_policy_outcome(
-    outcome: PolicyOutcome,
-    downstream_writer: &mut (impl AsyncWriteExt + Unpin),
-    client_writer: Option<&mut (impl AsyncWriteExt + Unpin)>,
-) -> Result<()> {
-    match outcome {
-        PolicyOutcome::Blocked { id, reason } => {
-            let response_writer =
-                client_writer.context("client writer unavailable for blocked response")?;
-            let response = blocked_response(&id, &reason);
-            forward_frame(response_writer, &response).await?;
-        }
-        PolicyOutcome::Forward(bytes) => {
-            forward_frame(downstream_writer, &bytes).await?;
-        }
+    if args.is_empty()
+        || args
+            .iter()
+            .any(|a| *a == "--help" || *a == "-h" || *a == "help")
+    {
+        return Ok(CliMode::Help);
     }
-    Ok(())
-}
-
-async fn finish_risk_outcome(
-    outcome: RiskOutcome,
-    frame: &mut Vec<u8>,
-    downstream_writer: &mut (impl AsyncWriteExt + Unpin),
-    client_writer: Option<&mut (impl AsyncWriteExt + Unpin)>,
-) -> Result<()> {
-    match outcome {
-        RiskOutcome::Denied { id, reason } => {
-            let response_writer =
-                client_writer.context("client writer unavailable for denied response")?;
-            let response = access_denied_response(&id, &reason);
-            forward_frame(response_writer, &response).await?;
-        }
-        RiskOutcome::Approved => {
-            forward_frame(downstream_writer, frame).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn apply_risk_pipeline(
-    policy: Option<&PolicyEngine>,
-    cloud_client: Option<&CloudClient>,
-    threat_intel: &ThreatIntelMatcher,
-    session_tracker: &SessionTracker,
-    input: &ClientPolicyInput,
-    frame: &mut Vec<u8>,
-    logger: &DebugLogger,
-    direction: &str,
-) -> Result<Option<RiskOutcome>> {
-    let tool_name = parse_tool_name(&input.tools_call_params)?;
-    let ioc_match = threat_intel.matches_payload(&input.tools_call_params);
-
-    if ioc_match {
-        logger
-            .log_inspection(
-                direction,
-                "threat intel: THREAT_INTEL_IOC_MATCH — unconditional block",
-            )
-            .await?;
-        session_tracker.record(&tool_name);
-        emit_telemetry(
-            cloud_client,
-            &tool_name,
-            threat_intel::IOC_BLOCK_SCORE,
-            threat_intel::TELEMETRY_IOC_MATCH,
-            UserDecision::Denied,
-        );
-        return Ok(Some(RiskOutcome::Denied {
-            id: input.request_id.clone(),
-            reason: "THREAT_INTEL_IOC_MATCH: blocked known indicator in tool payload".to_string(),
-        }));
-    }
-
-    let behavioral_anomaly =
-        session_tracker.verify_behavioral_chain(&tool_name, &input.tools_call_params);
-    let analysis = analyze_params(&tool_name, &input.tools_call_params);
-    let security = apply_security_layers(analysis.score, ioc_match, behavioral_anomaly);
-    let effective_score = security.effective_score;
-    let threshold = resolve_risk_threshold(policy.map(PolicyEngine::risk_threshold));
-    let force_gate = security.force_confirmation_gate || effective_score >= threshold;
-    let security_marker = security.telemetry_marker;
-
-    if behavioral_anomaly {
-        logger
-            .log_inspection(
-                direction,
-                "behavior: BEHAVIORAL_CHAIN_ANOMALY (filesystem probes -> network tool)",
-            )
-            .await?;
-    }
-
-    if let Some(sanitized) = analysis.sanitized_params {
-        let rewritten = rewrite_tools_call_frame(frame, sanitized.as_bytes())
-            .context("failed to rewrite risk-sanitized tools/call frame")?;
-        *frame = rewritten;
-        logger
-            .log_inspection(direction, "risk dlp: masked sensitive segments in params")
-            .await?;
-        emit_telemetry(
-            cloud_client,
-            &tool_name,
-            effective_score,
-            "risk_dlp_mask",
-            UserDecision::Skipped,
-        );
-    }
-
-    logger
-        .log_inspection(
-            direction,
-            &format!(
-                "risk score={} effective={} threshold={} tool={tool_name} force_gate={force_gate}",
-                analysis.score, effective_score, threshold
-            ),
-        )
-        .await?;
-
-    if !force_gate {
-        session_tracker.record(&tool_name);
-        return Ok(None);
-    }
-
-    logger
-        .log_inspection(
-            direction,
-            &format!("risk gate: awaiting operator confirmation for `{tool_name}`"),
-        )
-        .await?;
-
-    let preview = std::str::from_utf8(frame).unwrap_or(&input.tools_call_params);
-    let approved = prompt_user_confirmation(&tool_name, effective_score, preview).await;
-    let pattern = security_marker.unwrap_or("risk_threshold_exceeded");
-
-    session_tracker.record(&tool_name);
-
-    if approved {
-        logger
-            .log_inspection(direction, "risk gate: operator approved")
-            .await?;
-        emit_telemetry(
-            cloud_client,
-            &tool_name,
-            effective_score,
-            pattern,
-            UserDecision::Approved,
-        );
-        Ok(Some(RiskOutcome::Approved))
-    } else {
-        logger
-            .log_inspection(direction, "risk gate: operator denied")
-            .await?;
-        emit_telemetry(
-            cloud_client,
-            &tool_name,
-            effective_score,
-            pattern,
-            UserDecision::Denied,
-        );
-        Ok(Some(RiskOutcome::Denied {
-            id: input.request_id.clone(),
-            reason: if behavioral_anomaly {
-                "BEHAVIORAL_CHAIN_ANOMALY: operator denied exfiltration-risk tool chain"
-                    .to_string()
-            } else {
-                "user denied high-risk tool call".to_string()
-            },
-        }))
-    }
-}
-
-fn emit_telemetry(
-    cloud_client: Option<&CloudClient>,
-    tool_name: &str,
-    risk_score: u8,
-    pattern_matched: &str,
-    user_decision: UserDecision,
-) {
-    let Some(client) = cloud_client else {
-        return;
-    };
-
-    let record = TelemetryRecord::new(
-        client.device_id(),
-        tool_name,
-        risk_score,
-        pattern_matched,
-        user_decision,
-    );
-    client.dispatch_telemetry(record);
-}
-
-async fn apply_yaml_policy(
-    policy: Option<&PolicyEngine>,
-    cloud_client: Option<&CloudClient>,
-    input: &ClientPolicyInput,
-    frame: &mut Vec<u8>,
-    logger: &DebugLogger,
-    direction: &str,
-) -> Result<Option<PolicyOutcome>> {
-    let Some(engine) = policy else {
-        return Ok(None);
-    };
-
-    let tool_name = parse_tool_name(&input.tools_call_params)?;
-    let risk_score = calculate_risk_score(&tool_name, &input.tools_call_params);
-
-    match engine.evaluate_tools_call(&input.tools_call_params) {
-        PolicyVerdict::Allow => Ok(None),
-        PolicyVerdict::Block { reason } => {
-            logger
-                .log_inspection(direction, &format!("policy block: {reason}"))
-                .await?;
-            emit_telemetry(
-                cloud_client,
-                &tool_name,
-                risk_score,
-                &reason,
-                UserDecision::Denied,
-            );
-            Ok(Some(PolicyOutcome::Blocked {
-                id: input.request_id.clone(),
-                reason,
-            }))
-        }
-        PolicyVerdict::Confirm { message } => {
-            logger
-                .log_inspection(direction, &format!("policy confirm: {message}"))
-                .await?;
-            eprintln!("mcp-proxy: {message}");
-            emit_telemetry(
-                cloud_client,
-                &tool_name,
-                risk_score,
-                &message,
-                UserDecision::Skipped,
-            );
-            Ok(None)
-        }
-        PolicyVerdict::Redact { frame: redacted_params } => {
-            let rewritten = rewrite_tools_call_frame(frame, &redacted_params)
-                .context("failed to rewrite redacted tools/call frame")?;
-            logger
-                .log_inspection(direction, "policy redact: applied global redact_keys")
-                .await?;
-            emit_telemetry(
-                cloud_client,
-                &tool_name,
-                risk_score,
-                "global_redact_keys",
-                UserDecision::Skipped,
-            );
-            Ok(Some(PolicyOutcome::Forward(rewritten)))
-        }
-    }
-}
-
-async fn apply_wasm_policy(
-    wasm_policy: Option<&WasmPolicyEngine>,
-    cloud_client: Option<&CloudClient>,
-    input: &ClientPolicyInput,
-    frame: &mut Vec<u8>,
-    logger: &DebugLogger,
-    direction: &str,
-) -> Result<Option<PolicyOutcome>> {
-    let Some(engine) = wasm_policy else {
-        return Ok(None);
-    };
-
-    let tool_name = parse_tool_name(&input.tools_call_params)?;
-    let risk_score = calculate_risk_score(&tool_name, &input.tools_call_params);
-    let decision = engine.evaluate_tool_call(&tool_name, &input.tools_call_params)?;
-
-    match decision {
-        WasmDecision::Allow => Ok(None),
-        WasmDecision::Block { reason } => {
-            logger
-                .log_inspection(direction, &format!("wasm block: {reason}"))
-                .await?;
-            emit_telemetry(
-                cloud_client,
-                &tool_name,
-                risk_score,
-                &reason,
-                UserDecision::Denied,
-            );
-            Ok(Some(PolicyOutcome::Blocked {
-                id: input.request_id.clone(),
-                reason: format!("wasm: {reason}"),
-            }))
-        }
-        WasmDecision::Rewrite { modified_params } => {
-            let rewritten = rewrite_tools_call_frame(frame, modified_params.as_bytes())
-                .context("failed to rewrite wasm-modified tools/call frame")?;
-            logger
-                .log_inspection(direction, "wasm rewrite: modified tools/call params")
-                .await?;
-            emit_telemetry(
-                cloud_client,
-                &tool_name,
-                risk_score,
-                "wasm_rewrite",
-                UserDecision::Skipped,
-            );
-            Ok(Some(PolicyOutcome::Forward(rewritten)))
-        }
-    }
-}
-
-fn apply_server_policy(policy: Option<&PolicyEngine>, frame: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let engine = policy?;
-    let redacted = engine.redact_global_secrets(frame);
-    if redacted.as_slice() != frame.as_slice() {
-        Some(redacted)
-    } else {
-        None
-    }
-}
-
-/// Parses `mcp-proxy -- run <command> [args...]` from process arguments.
-fn parse_run_command(argv: &[String]) -> Result<RunCommand> {
-    let separator = argv
+    if args
         .iter()
-        .position(|arg| arg == "--")
-        .context("missing `--` separator; usage: mcp-proxy -- run <command> [args...]")?;
+        .any(|a| *a == "--version" || *a == "-V" || *a == "version")
+    {
+        return Ok(CliMode::Version);
+    }
+    if args.first().copied() == Some("demo") {
+        return Ok(CliMode::Demo);
+    }
+    if args.iter().any(|a| *a == "serve") {
+        return parse_serve_command(argv);
+    }
+    Ok(CliMode::Run(parse_run_command(argv)?))
+}
+
+fn parse_serve_command(argv: &[String]) -> Result<CliMode> {
+    let serve_pos = argv
+        .iter()
+        .position(|arg| arg == "serve")
+        .context("internal: serve token missing")?;
+
+    let mut listen = None;
+    let mut upstream = None;
+    let mut rest = argv[serve_pos + 1..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--listen" => {
+                listen = Some(rest.next().context("missing value after --listen")?.clone());
+            }
+            "--upstream" => {
+                upstream = Some(
+                    rest.next()
+                        .context("missing value after --upstream")?
+                        .clone(),
+                );
+            }
+            other => bail!("unknown serve option `{other}`"),
+        }
+    }
+
+    Ok(CliMode::Serve { listen, upstream })
+}
+
+fn parse_run_command(argv: &[String]) -> Result<RunCommand> {
+    let separator = argv.iter().position(|arg| arg == "--").context(
+        "missing `--` separator.\n\
+         Try:  mcp-proxy --help\n\
+         Or:   mcp-proxy demo\n\
+         Or:   mcp-proxy -- run <command> [args...]\n\
+         Or:   mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.openai.com",
+    )?;
 
     let mut tail = argv[separator + 1..].iter();
     match tail.next() {
         Some(keyword) if keyword == "run" => {}
         Some(other) => bail!(
-            "expected `run` after `--`, found `{other}`; usage: mcp-proxy -- run <command> [args...]"
+            "expected `run` after `--`, found `{other}`.\n\
+             Usage: mcp-proxy -- run <command> [args...]   (see mcp-proxy --help)"
         ),
-        None => bail!("missing `run` subcommand after `--`"),
+        None => bail!("missing `run` subcommand after `--` (see mcp-proxy --help)"),
     }
 
     let program = tail
         .next()
         .context("missing downstream command after `run`")?
         .clone();
-
     let args = tail.cloned().collect();
-
     Ok(RunCommand { program, args })
 }
 
-/// Resolves the debug log destination from the environment or a default file name.
 fn resolve_log_path() -> PathBuf {
     env::var(LOG_PATH_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_LOG_FILE))
 }
 
-/// Spawns the downstream MCP server with piped stdin/stdout and inherited stderr.
 async fn spawn_downstream(command: &RunCommand) -> Result<Child> {
     Command::new(&command.program)
         .args(&command.args)
@@ -685,14 +543,13 @@ async fn spawn_downstream(command: &RunCommand) -> Result<Child> {
         })
 }
 
-/// Relays newline-delimited byte frames from the AI client to the downstream MCP server.
 async fn relay_client_to_server(
     logger: Arc<DebugLogger>,
     policy_store: Arc<PolicyStore>,
-    wasm_policy: Arc<Option<WasmPolicyEngine>>,
+    guard_base: GuardContext,
     cloud_client: Arc<Option<CloudClient>>,
     threat_intel_store: Arc<ThreatIntelStore>,
-    session_tracker: Arc<SessionTracker>,
+    normalization: Arc<NormalizationContext>,
     mut child_stdin: tokio::process::ChildStdin,
 ) -> Result<()> {
     let mut client_reader = BufReader::new(tokio::io::stdin());
@@ -718,10 +575,10 @@ async fn relay_client_to_server(
             &mut child_stdin,
             Some(&mut client_writer),
             policy_store.as_ref(),
-            wasm_policy.as_ref().as_ref(),
+            &guard_base,
             cloud_client.as_ref().as_ref(),
             threat_intel_store.as_ref(),
-            session_tracker.as_ref(),
+            normalization.as_ref(),
         )
         .await
         .context("failed to relay client-to-server frame")?;
@@ -731,12 +588,12 @@ async fn relay_client_to_server(
     Ok(())
 }
 
-/// Relays newline-delimited byte frames from the downstream MCP server to the AI client.
 async fn relay_server_to_client(
     logger: Arc<DebugLogger>,
     policy_store: Arc<PolicyStore>,
+    guard_base: GuardContext,
     threat_intel_store: Arc<ThreatIntelStore>,
-    session_tracker: Arc<SessionTracker>,
+    normalization: Arc<NormalizationContext>,
     child_stdout: tokio::process::ChildStdout,
 ) -> Result<()> {
     let mut server_reader = BufReader::new(child_stdout);
@@ -762,10 +619,10 @@ async fn relay_server_to_client(
             &mut client_writer,
             None::<&mut tokio::io::Stdout>,
             policy_store.as_ref(),
-            None,
+            &guard_base,
             None,
             threat_intel_store.as_ref(),
-            session_tracker.as_ref(),
+            normalization.as_ref(),
         )
         .await
         .context("failed to relay server-to-client frame")?;
@@ -774,70 +631,40 @@ async fn relay_server_to_client(
     Ok(())
 }
 
-/// Runs relay tasks until a leg finishes or the downstream child exits, then aborts the rest.
-///
-/// Without this, a downstream MCP server that exits after one response leaves the
-/// client→server task blocked on stdin forever.
-async fn run_until_shutdown(
-    mut child: Child,
+async fn join_relays(
     client_to_server: JoinHandle<Result<()>>,
     server_to_client: JoinHandle<Result<()>>,
 ) -> Result<()> {
-    let client_abort = client_to_server.abort_handle();
-    let server_abort = server_to_client.abort_handle();
+    let (client_result, server_result) = tokio::join!(client_to_server, server_to_client);
+    client_result.context("client-to-server relay task panicked")??;
+    server_result.context("server-to-client relay task panicked")??;
+    Ok(())
+}
 
-    tokio::pin!(client_to_server);
-    tokio::pin!(server_to_client);
-
-    let mut client_done = false;
-    let mut server_done = false;
-
-    loop {
-        tokio::select! {
-            client_result = &mut client_to_server, if !client_done => {
-                client_result
-                    .context("client-to-server relay task join failed")?
-                    .context("client-to-server relay task panicked")?;
-                client_done = true;
-            }
-            server_result = &mut server_to_client, if !server_done => {
-                server_result
-                    .context("server-to-client relay task join failed")?
-                    .context("server-to-client relay task panicked")?;
-                server_done = true;
-                if !client_done {
-                    client_abort.abort();
-                }
-            }
-            wait_result = child.wait(), if !client_done || !server_done => {
-                client_abort.abort();
-                server_abort.abort();
-                match wait_result {
-                    Ok(_status) => return Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => return Ok(()),
-                    Err(error) => {
-                        return Err(error).context("failed while waiting for downstream MCP server");
-                    }
-                }
-            }
-        }
-
-        if client_done && server_done {
-            return Ok(());
-        }
+async fn shutdown_child(mut child: Child) -> Result<()> {
+    match child.wait().await {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => bail!("downstream MCP server exited with status: {status}"),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+        Err(error) => Err(error).context("failed while waiting for downstream MCP server"),
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let argv: Vec<String> = env::args().collect();
-    let run_command = parse_run_command(&argv)?;
-
-    let cloud_client = Arc::new(CloudClient::load_optional());
+async fn bootstrap_shared_state() -> Result<(
+    Arc<Option<CloudClient>>,
+    Arc<PolicyStore>,
+    Option<Arc<WasmPolicyEngine>>,
+    Arc<ThreatIntelStore>,
+    Arc<SessionTracker>,
+    Arc<NormalizationContext>,
+)> {
+    let cloud_opt = CloudClient::load_optional();
+    let cloud_client = Arc::new(cloud_opt);
 
     let policy_store = Arc::new(PolicyStore::new(
-        load_policy_engine(cloud_client.as_ref().as_ref()).await
-            .with_context(|| "failed to load mcp-proxy policy")?,
+        load_policy_engine(cloud_client.as_ref().as_ref())
+            .await
+            .context("failed to load mcp-proxy policy")?,
     ));
 
     let mut wasm_policy = WasmPolicyEngine::load_optional()?;
@@ -848,13 +675,16 @@ async fn main() -> Result<()> {
             env::var(WASM_POLICY_ENV).unwrap_or_default()
         );
     }
-
-    let wasm_policy = Arc::new(wasm_policy);
+    let wasm_shared = wasm_policy.map(Arc::new);
 
     let threat_intel_store = Arc::new(ThreatIntelStore::new(
         load_threat_intel_matcher(cloud_client.as_ref().as_ref()).await,
     ));
     let session_tracker = Arc::new(SessionTracker::default());
+
+    // Ambient identity for every action this process normalizes. Session scope matches
+    // `session_tracker`: one process, one session, unless `SQREEN_SESSION_ID` overrides it.
+    let normalization = Arc::new(NormalizationContext::from_env());
 
     if let Some(engine) = policy_store.snapshot() {
         eprintln!(
@@ -862,8 +692,25 @@ async fn main() -> Result<()> {
             engine.version(),
             engine.tool_count()
         );
+        eprintln!(
+            "mcp-proxy: {}",
+            mcp_proxy::EnforcementPosture::from_env().enforcement_banner()
+        );
     } else {
-        eprintln!("mcp-proxy: no policy loaded; running in passthrough mode");
+        let posture = mcp_proxy::EnforcementPosture::from_env();
+        eprintln!("mcp-proxy: {}", posture.enforcement_banner());
+        if posture.allows_missing_policy_passthrough() {
+            eprintln!(
+                "mcp-proxy: WARNING — no policy loaded; DEVELOPMENT posture FAIL_OPEN \
+                 (tool calls are NOT protected by declarative policy)"
+            );
+        } else {
+            eprintln!(
+                "mcp-proxy: no policy loaded; {} posture will DENY tool execution \
+                 until a valid policy is available (reason=policy_unavailable)",
+                posture.as_str()
+            );
+        }
     }
 
     if cloud_client.as_ref().is_some() {
@@ -879,15 +726,58 @@ async fn main() -> Result<()> {
         );
     }
 
+    Ok((
+        cloud_client,
+        policy_store,
+        wasm_shared,
+        threat_intel_store,
+        session_tracker,
+        normalization,
+    ))
+}
+
+fn make_guard_base(
+    policy_store: &PolicyStore,
+    wasm: &Option<Arc<WasmPolicyEngine>>,
+    threat_intel_store: &ThreatIntelStore,
+    session: &Arc<SessionTracker>,
+    cloud_client: &Arc<Option<CloudClient>>,
+) -> GuardContext {
+    GuardContext {
+        policy: policy_store.snapshot(),
+        policy_availability: policy_store.availability(),
+        wasm: wasm.clone(),
+        threat_intel: Arc::new(threat_intel_store.snapshot()),
+        session: Arc::clone(session),
+        cloud: cloud_client.as_ref().as_ref().map(|c| Arc::new(c.clone())),
+    }
+}
+
+async fn run_stdio_mode(run_command: RunCommand) -> Result<()> {
+    let (
+        cloud_client,
+        policy_store,
+        wasm_shared,
+        threat_intel_store,
+        session_tracker,
+        normalization,
+    ) = bootstrap_shared_state().await?;
+
+    let guard_base = make_guard_base(
+        policy_store.as_ref(),
+        &wasm_shared,
+        threat_intel_store.as_ref(),
+        &session_tracker,
+        &cloud_client,
+    );
+
     let logger = Arc::new(DebugLogger::open(resolve_log_path()).await?);
-    let mut child = spawn_downstream(&run_command)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to start downstream MCP server `{}` — check that the command exists and is executable",
-                run_command.program
-            )
-        })?;
+    let mut child = spawn_downstream(&run_command).await.with_context(|| {
+        format!(
+            "failed to start downstream MCP server `{}` — check that the command exists and is executable",
+            run_command.program
+        )
+    })?;
 
     let child_stdin = child
         .stdin
@@ -900,18 +790,18 @@ async fn main() -> Result<()> {
 
     let logger_for_client = Arc::clone(&logger);
     let policy_for_client = Arc::clone(&policy_store);
-    let wasm_for_client = Arc::clone(&wasm_policy);
+    let guard_for_client = guard_base.clone();
     let cloud_for_client = Arc::clone(&cloud_client);
     let threat_intel_for_client = Arc::clone(&threat_intel_store);
-    let session_tracker_for_client = Arc::clone(&session_tracker);
+    let normalization_for_client = Arc::clone(&normalization);
     let client_to_server = tokio::spawn(async move {
         relay_client_to_server(
             logger_for_client,
             policy_for_client,
-            wasm_for_client,
+            guard_for_client,
             cloud_for_client,
             threat_intel_for_client,
-            session_tracker_for_client,
+            normalization_for_client,
             child_stdin,
         )
         .await
@@ -919,28 +809,84 @@ async fn main() -> Result<()> {
 
     let logger_for_server = Arc::clone(&logger);
     let policy_for_server = Arc::clone(&policy_store);
+    let guard_for_server = guard_base.clone();
     let threat_intel_for_server = Arc::clone(&threat_intel_store);
-    let session_tracker_for_server = Arc::clone(&session_tracker);
+    let normalization_for_server = Arc::clone(&normalization);
     let server_to_client = tokio::spawn(async move {
         relay_server_to_client(
             logger_for_server,
             policy_for_server,
+            guard_for_server,
             threat_intel_for_server,
-            session_tracker_for_server,
+            normalization_for_server,
             child_stdout,
         )
         .await
     });
 
-    let relay_result =
-        run_until_shutdown(child, client_to_server, server_to_client).await;
-
+    let relay_result = join_relays(client_to_server, server_to_client).await;
+    if let Err(error) = shutdown_child(child).await {
+        eprintln!("mcp-proxy: warning during child shutdown: {error:#}");
+    }
     relay_result
+}
+
+async fn run_serve_mode(listen: Option<String>, upstream: Option<String>) -> Result<()> {
+    let (
+        cloud_client,
+        policy_store,
+        wasm_shared,
+        threat_intel_store,
+        session_tracker,
+        normalization,
+    ) = bootstrap_shared_state().await?;
+
+    let policy_bg = Arc::clone(&policy_store);
+    let threat_bg = Arc::clone(&threat_intel_store);
+    let cloud_bg = Arc::clone(&cloud_client);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            policy_bg.refresh_if_stale(cloud_bg.as_ref().as_ref()).await;
+            threat_bg.refresh_if_stale(cloud_bg.as_ref().as_ref()).await;
+        }
+    });
+
+    let config = ServeConfig::from_args_and_env(listen.as_deref(), upstream.as_deref())?;
+    run_agent_firewall_with_stores(
+        config,
+        policy_store,
+        wasm_shared,
+        threat_intel_store,
+        session_tracker,
+        cloud_client.as_ref().as_ref().map(|c| Arc::new(c.clone())),
+        normalization,
+    )
+    .await
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let argv: Vec<String> = env::args().collect();
+    match parse_cli(&argv)? {
+        CliMode::Help => {
+            print_help();
+            Ok(())
+        }
+        CliMode::Version => {
+            println!("mcp-proxy {VERSION}");
+            Ok(())
+        }
+        CliMode::Demo => run_first_block_demo(),
+        CliMode::Run(run_command) => run_stdio_mode(run_command).await,
+        CliMode::Serve { listen, upstream } => run_serve_mode(listen, upstream).await,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_run_command;
+    use super::*;
 
     #[test]
     fn parses_run_command_after_separator() {
@@ -954,16 +900,41 @@ mod tests {
             "8080".to_string(),
         ];
 
-        let command = parse_run_command(&argv).expect("command should parse");
-        assert_eq!(command.program, "node");
-        assert_eq!(
-            command.args,
-            vec![
-                "/tmp/server.js".to_string(),
-                "--port".to_string(),
-                "8080".to_string(),
-            ]
-        );
+        let mode = parse_cli(&argv).expect("command should parse");
+        match mode {
+            CliMode::Run(command) => {
+                assert_eq!(command.program, "node");
+                assert_eq!(
+                    command.args,
+                    vec![
+                        "/tmp/server.js".to_string(),
+                        "--port".to_string(),
+                        "8080".to_string(),
+                    ]
+                );
+            }
+            _ => panic!("expected run mode"),
+        }
+    }
+
+    #[test]
+    fn parses_serve_command() {
+        let argv = vec![
+            "mcp-proxy".to_string(),
+            "serve".to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:9999".to_string(),
+            "--upstream".to_string(),
+            "http://127.0.0.1:18080".to_string(),
+        ];
+        let mode = parse_cli(&argv).expect("serve should parse");
+        match mode {
+            CliMode::Serve { listen, upstream } => {
+                assert_eq!(listen.as_deref(), Some("127.0.0.1:9999"));
+                assert_eq!(upstream.as_deref(), Some("http://127.0.0.1:18080"));
+            }
+            _ => panic!("expected serve mode"),
+        }
     }
 
     #[test]
@@ -975,7 +946,17 @@ mod tests {
             "node".to_string(),
         ];
 
-        let error = parse_run_command(&argv).expect_err("parser should reject invalid keyword");
+        let error = parse_cli(&argv).expect_err("parser should reject invalid keyword");
         assert!(error.to_string().contains("expected `run`"));
+    }
+
+    #[test]
+    fn parses_help_and_demo() {
+        let help = parse_cli(&["mcp-proxy".into(), "--help".into()]).unwrap();
+        assert!(matches!(help, CliMode::Help));
+        let demo = parse_cli(&["mcp-proxy".into(), "demo".into()]).unwrap();
+        assert!(matches!(demo, CliMode::Demo));
+        let ver = parse_cli(&["mcp-proxy".into(), "--version".into()]).unwrap();
+        assert!(matches!(ver, CliMode::Version));
     }
 }

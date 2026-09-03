@@ -1,22 +1,46 @@
 [package]
 name = "mcp-proxy"
-version = "0.1.11"
+version = "0.1.9"
 edition = "2021"
-description = "Local-first runtime security firewall for MCP (Model Context Protocol)"
+description = "Local-first runtime security firewall for MCP and OpenAI-compatible agent tool calls"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+
+[lib]
+name = "mcp_proxy"
+path = "src/lib.rs"
 
 [[bin]]
 name = "mcp-proxy"
 path = "src/main.rs"
 
+[[bin]]
+name = "generate-security-baseline"
+path = "src/bin/generate-security-baseline.rs"
+
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
+hex = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 serde_yaml = "0.9"
+sha2 = "0.10"
 tokio = { version = "1.43", features = ["full"] }
-wasmtime = "46"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-chrono = { version = "0.4", features = ["serde"] }
+wasmtime = "29"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+
+[[bench]]
+name = "enforcement"
+harness = false
