@@ -387,6 +387,29 @@ atomic_install_binary() {
   mv -f "$tmp_dest" "$dest"
 }
 
+# Brand alias — same binary as mcp-proxy (hard link when possible, else symlink).
+install_sqreen_alias() {
+  local dest="${INSTALL_DIR}/mcp-proxy"
+  local alias_path="${INSTALL_DIR}/sqreen"
+  if [[ ! -x "$dest" ]]; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] would install alias ${alias_path} → mcp-proxy"
+    return 0
+  fi
+  rm -f "$alias_path"
+  if ln "$dest" "$alias_path" 2>/dev/null; then
+    success "Alias ready: ${alias_path} (hard link)"
+  elif ln -s "mcp-proxy" "$alias_path" 2>/dev/null; then
+    success "Alias ready: ${alias_path} → mcp-proxy"
+  else
+    cp "$dest" "$alias_path"
+    chmod 0755 "$alias_path"
+    success "Alias ready: ${alias_path} (copy)"
+  fi
+}
+
 installed_proxy_version() {
   local bin="${INSTALL_DIR}/mcp-proxy"
   if [[ ! -x "$bin" ]]; then
@@ -549,6 +572,7 @@ download_binary() {
     try_build_from_source "$dest"
     success "Installed mcp-proxy from source → ${dest}"
     sign_mcp_proxy_binary "$dest"
+    install_sqreen_alias
     info "$("$dest" --version 2>/dev/null || echo 'mcp-proxy (version probe unavailable)')"
     return 0
   fi
@@ -611,6 +635,7 @@ download_binary() {
 
   success "Installed mcp-proxy → ${dest}"
   sign_mcp_proxy_binary "$dest"
+  install_sqreen_alias
   info "$("$dest" --version 2>/dev/null || echo 'mcp-proxy (version probe unavailable)')"
 }
 
@@ -640,6 +665,7 @@ build_mcp_proxy_at() {
   (cd "$root" && cargo build --release --locked)
   atomic_install_binary "${root}/target/release/mcp-proxy" "$dest"
   sign_mcp_proxy_binary "$dest"
+  install_sqreen_alias
 }
 
 build_from_github_source() {
@@ -1027,7 +1053,7 @@ Quick start:
 
 Uninstall:
   Restore IDE mcp.json from the newest .bak.* beside it (if wrapped).
-  Remove: ${INSTALL_DIR}/mcp-proxy
+  Remove: ${INSTALL_DIR}/mcp-proxy (and optional ${INSTALL_DIR}/sqreen alias)
   Optional purge: rm -rf ${CONFIG_DIR} ${DATA_DIR}
   Remove PATH lines added to ~/.zshrc / ~/.bashrc / ~/.profile
 
@@ -1333,12 +1359,14 @@ main() {
   printf "\n"
   success "Installation complete"
   info "Binary:  ${INSTALL_DIR}/mcp-proxy"
+  info "Alias:   ${INSTALL_DIR}/sqreen  (same binary)"
   info "Config:  ${CONFIG_DIR}"
   info "Logs:    ${DATA_DIR}/mcp-proxy.log"
   printf "\n"
   info "See your first protected Agent Action (safe demo):"
   printf "  source %s\n" "${CONFIG_DIR}/env"
-  printf "  mcp-proxy demo\n\n"
+  printf "  mcp-proxy demo\n"
+  printf "  # or: sqreen demo\n\n"
   info "Then restart Claude Desktop / Cursor, or run an MCP server:"
   printf "  mcp-proxy -- run npx -y @modelcontextprotocol/server-filesystem .\n\n"
   info "OpenAI-compatible HTTP agents:"

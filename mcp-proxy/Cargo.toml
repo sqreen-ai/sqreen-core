@@ -14,6 +14,11 @@ path = "src/lib.rs"
 name = "mcp-proxy"
 path = "src/main.rs"
 
+# Thin alias — same binary as mcp-proxy (Sqreen Core brand).
+[[bin]]
+name = "sqreen"
+path = "src/main.rs"
+
 [[bin]]
 name = "generate-security-baseline"
 path = "src/bin/generate-security-baseline.rs"
