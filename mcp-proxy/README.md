@@ -1,8 +1,11 @@
 # Sqreen Core (`mcp-proxy`)
 
-Local runtime enforcement for AI agent tool calls — MCP, OpenAI-compatible HTTP, and Cursor Integrations.
+Local runtime enforcement for intercepted AI agent tool calls — MCP, OpenAI-compatible HTTP, and IDE Integrations.
 
-Product overview (what / why / privacy / vs guardrails): **[../README.md](../README.md)**.
+Product overview (what / why / privacy / vs guardrails): **[../README.md](../README.md)**.  
+Pilot path: **[../docs/QUICKSTART.md](../docs/QUICKSTART.md)**.
+
+Binary name: **`mcp-proxy`**. Optional alias binary: **`sqreen`** (same CLI).
 
 ## 5-minute first run
 
@@ -13,11 +16,15 @@ curl -fsSL https://sqreen.ai/install.sh | bash
 # 2. Load config (sets MCP_POLICY_PATH)
 source ~/.config/mcp-proxy/env
 
-# 3. See the aha moment — allow, then block, with an explanation
+# 3. See the aha moment — allow, block, confirm/approval
 mcp-proxy demo
+
+# 4. Health
+mcp-proxy status
+mcp-proxy doctor
 ```
 
-The demo uses **synthetic paths only** (`/tmp/sqreen-demo-ok.txt` and `/tmp/sqreen-demo.ssh/id_rsa`). No real secrets or destructive commands.
+The demo uses **synthetic paths only** (`/tmp/sqreen-demo-ok.txt`, `/tmp/sqreen-demo.ssh/id_rsa`, benign `execute_bash`). No real secrets or destructive commands.
 
 ## Wrap MCP (Cursor / Claude Desktop)
 
@@ -38,6 +45,8 @@ Manual wrap:
   }
 }
 ```
+
+Check wraps: `mcp-proxy integrations`.
 
 ## OpenAI-compatible agents
 
@@ -60,19 +69,29 @@ mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.anthropic.com
 |------------|-----|
 | **First policy** | `~/.config/mcp-proxy/mcp-policy.yaml` (seeded by installer) |
 | **First block** | `mcp-proxy demo` or agent `read_file` on a `.ssh`-shaped path |
-| **First approval** | Tool `execute_bash` is `Confirm` — high-risk actions prompt on the Runtime TTY |
+| **First approval** | Tool `execute_bash` is `Confirm` — local TTY or Cloud SOC when `SQREEN_APPROVAL_MODE=remote\|auto` |
 
-Edit policy, then re-run `mcp-proxy demo` or restart the IDE MCP server.
+Edit policy, then re-run `mcp-proxy demo` or restart the IDE MCP server. Do not disable the security baseline to clear blocks.
 
 ## CLI
 
 ```text
 mcp-proxy demo
+mcp-proxy status
+mcp-proxy doctor
+mcp-proxy integrations
+mcp-proxy support-bundle [--out DIR]
+mcp-proxy enroll --control-plane URL --device-token TOKEN [--device-id ID] [--org-id ORG]
 mcp-proxy --help
 mcp-proxy --version
 mcp-proxy -- run <mcp-server> [args...]
 mcp-proxy serve [--listen ADDR] [--upstream URL]
+
+sqreen …                    # same commands (alias binary)
 ```
+
+`enroll` writes `~/.config/mcp-proxy/env` (mode `0600`) and never echoes the device token.  
+`support-bundle` writes a redacted diagnostics folder — inspect before sharing.
 
 ## Uninstall / rollback
 
@@ -86,7 +105,9 @@ Restore IDE configs from the newest `mcp.json.bak.*` beside the live file.
 ## Verify (developers)
 
 ```bash
-cargo test -p mcp-proxy demo::
+cargo test --lib pilot -- --nocapture
+cargo test --lib demo -- --nocapture
+./scripts/pilot-onboarding-smoke.sh
 ./scripts/e2e-policy-test.sh
 ./scripts/test-cursor-hook.sh
 ./scripts/run-benchmarks.sh          # Criterion enforcement suite — see ../../docs/BENCHMARKS.md

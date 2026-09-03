@@ -43,6 +43,7 @@ pub mod guard;
 pub mod http_serve;
 pub mod identity;
 pub mod peeker;
+pub mod pilot;
 pub mod policy;
 pub mod policy_store;
 pub mod risk;

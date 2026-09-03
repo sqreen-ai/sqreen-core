@@ -19,7 +19,7 @@ Usage:
             (policy, env, logs). Default keeps config.
 
 This script:
-  1. Removes ${INSTALL_DIR}/mcp-proxy
+  1. Removes ${INSTALL_DIR}/mcp-proxy and ${INSTALL_DIR}/sqreen (alias)
   2. Lists IDE mcp.json backups (*.bak.*) so you can restore
   3. Optionally purges config/data with --purge
 
@@ -44,6 +44,13 @@ if [[ -x "${INSTALL_DIR}/mcp-proxy" || -f "${INSTALL_DIR}/mcp-proxy" ]]; then
   echo "✔  Removed ${INSTALL_DIR}/mcp-proxy"
 else
   echo "·  Binary not found at ${INSTALL_DIR}/mcp-proxy"
+fi
+
+if [[ -e "${INSTALL_DIR}/sqreen" ]]; then
+  rm -f "${INSTALL_DIR}/sqreen"
+  echo "✔  Removed ${INSTALL_DIR}/sqreen alias"
+else
+  echo "·  Alias not found at ${INSTALL_DIR}/sqreen"
 fi
 
 echo

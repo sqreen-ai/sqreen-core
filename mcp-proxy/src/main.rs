@@ -1,4 +1,4 @@
-//! # mcp-proxy
+//! # mcp-proxy / Sqreen Core
 //!
 //! Local-first runtime security for MCP stdio and OpenAI-compatible HTTP agent traffic.
 //!
@@ -6,6 +6,8 @@
 //!
 //! ```text
 //! mcp-proxy demo
+//! mcp-proxy status
+//! mcp-proxy doctor
 //! mcp-proxy --help
 //! mcp-proxy --version
 //! mcp-proxy -- run <command> [args...]
@@ -29,6 +31,7 @@ use mcp_proxy::gateway::{sanitize_detail, sanitize_error, FailurePolicy, Subsyst
 use mcp_proxy::guard::{evaluate_outcome, GuardContext};
 use mcp_proxy::http_serve::{run_agent_firewall_with_stores, sanitize_server_frame, ServeConfig};
 use mcp_proxy::peeker::{format_peek_summary, peek_envelope, McpMessageType};
+use mcp_proxy::pilot::{parse_pilot_command, run_pilot, PilotCommand};
 use mcp_proxy::policy::{access_denied_response, blocked_response, rewrite_tools_call_frame};
 use mcp_proxy::policy_store::{load_policy_engine, PolicyStore};
 use mcp_proxy::risk::mask_secrets_in_frame;
@@ -51,23 +54,38 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn print_help() {
     println!(
         "\
-mcp-proxy {VERSION} — security layer for AI agent tool calls
+Sqreen Core (mcp-proxy) {VERSION} — security layer for AI agent tool calls
 
 Usage:
   mcp-proxy demo
+  mcp-proxy status
+  mcp-proxy doctor
+  mcp-proxy integrations
+  mcp-proxy support-bundle [--out DIR]
+  mcp-proxy enroll --control-plane URL --device-token TOKEN [--device-id ID]
+  mcp-proxy update --check
   mcp-proxy -- run <command> [args...]
   mcp-proxy serve [--listen ADDR] [--upstream URL]
   mcp-proxy --help
   mcp-proxy --version
 
+  (alias) sqreen …   same commands as mcp-proxy
+
 Commands:
-  demo     Safe first-run demo: allow one action, block a sensitive path, explain why
-  serve    HTTP proxy for OpenAI-compatible (and Anthropic-shaped) agent tool traffic
-  -- run   Wrap an MCP stdio server (used by Cursor / Claude Desktop)
+  demo            Safe first-run demo: allow, block, confirm/approval, explain
+  status          Protection ACTIVE/INACTIVE, policy, posture, cloud, integrations
+  doctor          PASS/WARN/FAIL health checks with remediation
+  integrations    Detect Cursor/Claude wrap, control plane, OPENAI_BASE_URL
+  support-bundle  Write a redacted diagnostics folder (inspect before sharing)
+  enroll          Write control-plane URL + device token to ~/.config/mcp-proxy/env
+  update          Compare local version to signed release channel (--check; no auto-install)
+  serve           HTTP proxy for OpenAI-compatible (and Anthropic-shaped) agent tool traffic
+  -- run          Wrap an MCP stdio server (used by Cursor / Claude Desktop)
 
 Examples:
   source ~/.config/mcp-proxy/env
   mcp-proxy demo
+  mcp-proxy status && mcp-proxy doctor
 
   mcp-proxy -- run npx -y @modelcontextprotocol/server-filesystem .
 
@@ -76,6 +94,9 @@ Examples:
 
 Policy:
   MCP_POLICY_PATH   Override policy file (default: ./mcp-policy.yaml or ~/.config/mcp-proxy/mcp-policy.yaml)
+
+Docs:
+  docs/QUICKSTART.md · docs/PRIVACY.md · docs/DESIGN_PARTNER.md
 
 Uninstall:
   See README — restore IDE mcp.json from .bak.* and remove ~/.local/bin/mcp-proxy
@@ -96,6 +117,7 @@ enum CliMode {
     Help,
     Version,
     Demo,
+    Pilot(PilotCommand),
     Run(RunCommand),
     Serve {
         listen: Option<String>,
@@ -440,7 +462,7 @@ async fn inspect_and_relay(
     Ok(())
 }
 
-/// Parses CLI: `demo` | `serve …` | `-- run …` | help/version.
+/// Parses CLI: `demo` | pilot cmds | `serve …` | `-- run …` | help/version.
 fn parse_cli(argv: &[String]) -> Result<CliMode> {
     let args: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
 
@@ -459,6 +481,9 @@ fn parse_cli(argv: &[String]) -> Result<CliMode> {
     }
     if args.first().copied() == Some("demo") {
         return Ok(CliMode::Demo);
+    }
+    if let Some(pilot) = parse_pilot_command(argv)? {
+        return Ok(CliMode::Pilot(pilot));
     }
     if args.iter().any(|a| *a == "serve") {
         return parse_serve_command(argv);
@@ -879,6 +904,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         CliMode::Demo => run_first_block_demo(),
+        CliMode::Pilot(cmd) => run_pilot(cmd).await,
         CliMode::Run(run_command) => run_stdio_mode(run_command).await,
         CliMode::Serve { listen, upstream } => run_serve_mode(listen, upstream).await,
     }
@@ -958,5 +984,9 @@ mod tests {
         assert!(matches!(demo, CliMode::Demo));
         let ver = parse_cli(&["mcp-proxy".into(), "--version".into()]).unwrap();
         assert!(matches!(ver, CliMode::Version));
+        let status = parse_cli(&["mcp-proxy".into(), "status".into()]).unwrap();
+        assert!(matches!(status, CliMode::Pilot(PilotCommand::Status)));
+        let doctor = parse_cli(&["sqreen".into(), "doctor".into()]).unwrap();
+        assert!(matches!(doctor, CliMode::Pilot(PilotCommand::Doctor)));
     }
 }

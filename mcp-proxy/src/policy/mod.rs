@@ -41,7 +41,7 @@ pub use signed::{
     persist_acceptance, persist_signed_envelope, policy_digest, reject_err, require_signed_policy,
     verify_signature, PolicyAcceptanceState, PolicyRejectReason, SignedPolicyEnvelope,
     VerifiedPolicyActivation, ALLOW_TEST_KEYS_ENV, ALLOW_UNSIGNED_ENV, ENVELOPE_SCHEMA_VERSION,
-    ORG_ID_ENV, PRIMARY_POLICY_KEY_ID, TEST_POLICY_KEY_ID,
+    ORG_ID_ENV, ORG_ID_ENV_ALT, PRIMARY_POLICY_KEY_ID, TEST_POLICY_KEY_ID,
 };
 pub use validate::{is_legacy_only, validate_config};
 
