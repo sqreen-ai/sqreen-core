@@ -38,8 +38,8 @@ use crate::action::{AgentAction, Arguments, Runtime, SourceRef};
 use crate::behavior::SessionTracker;
 use crate::cloud_client::CloudClient;
 use crate::gateway::{
-    AgentExecutionGateway, EvaluationOutcome, FailurePolicy, NullAuditSink, PolicyAvailability,
-    TerminalApprovalEngine, TimeoutApprovalEngine,
+    select_approval_engine, AgentExecutionGateway, EvaluationOutcome, FailurePolicy, NullAuditSink,
+    PolicyAvailability, TimeoutApprovalEngine,
 };
 use crate::policy::PolicyEngine;
 use crate::threat_intel::ThreatIntelMatcher;
@@ -141,13 +141,16 @@ pub struct GuardContext {
 impl GuardContext {
     /// Builds the gateway this context describes.
     ///
-    /// Configures the local runtime's stages: no identity resolver, because the adapters
-    /// already applied a [`crate::adapters::NormalizationContext`]; terminal approvals; and
-    /// control-plane auditing when a client is configured.
+    /// Configures the local runtime's stages: no identity resolver beyond env static claims;
+    /// approval engine selected by `SQREEN_APPROVAL_MODE` (`local` default, `remote` /
+    /// `auto` when a cloud client is present); and control-plane auditing when configured.
     ///
     /// Construction is cheap — every field is an `Arc` — which is what lets the relays call
     /// this per frame and pick up a hot-reloaded policy snapshot.
     pub fn gateway(&self) -> AgentExecutionGateway {
+        let approval = TimeoutApprovalEngine::with_default_deadline(select_approval_engine(
+            self.cloud.as_ref(),
+        ));
         let builder = AgentExecutionGateway::builder()
             .policy_engine(self.policy.clone())
             .policy_availability(self.policy_availability)
@@ -156,9 +159,7 @@ impl GuardContext {
             .session(self.session.clone())
             .identity(Arc::new(crate::gateway::StaticIdentityResolver::from_env()))
             .failure_policy(FailurePolicy::from_env())
-            .approval(Arc::new(TimeoutApprovalEngine::with_default_deadline(
-                Arc::new(TerminalApprovalEngine),
-            )));
+            .approval(Arc::new(approval));
 
         match self.cloud.clone() {
             Some(client) => builder.cloud_audit(client),

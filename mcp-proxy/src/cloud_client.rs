@@ -50,6 +50,7 @@ pub const DEVICE_TOKEN_HEADER: &str = "X-Device-Token";
 const POLICY_SYNC_PATH: &str = "/api/v1/policy/sync";
 const THREAT_INTEL_SYNC_PATH: &str = "/api/v1/threat-intel/sync";
 const TELEMETRY_PATH: &str = "/api/v1/telemetry/log";
+const DEVICE_APPROVALS_PATH: &str = "/api/v1/device/approvals";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOUD_POLICY_CACHE_NAME: &str = "mcp-policy.cloud.signed.json";
 const CLOUD_THREAT_INTEL_CACHE_NAME: &str = "threat-intel.cloud.json";
@@ -77,6 +78,50 @@ pub enum UserDecision {
     Approved,
     Denied,
     Skipped,
+}
+
+/// Device API status / create response for remote approvals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteApprovalStatus {
+    pub id: String,
+    pub status: String,
+    #[serde(default)]
+    pub action_digest: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Create-request body for POST /api/v1/device/approvals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRemoteApprovalBody {
+    pub action_digest: String,
+    pub tool_name: String,
+    pub sanitized_arguments: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_bound_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_trust: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_resource: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    pub risk_score: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risk_factors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_policies: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// Structured violation payload aligned with the Go control plane schema.
@@ -531,6 +576,81 @@ impl CloudClient {
             "control plane rejected telemetry with status {}",
             response.status()
         );
+    }
+
+    /// Creates (or reuses) a remote approval request on the control plane.
+    pub async fn create_approval_request(
+        &self,
+        body: CreateRemoteApprovalBody,
+    ) -> Result<RemoteApprovalStatus> {
+        let url = format!("{}{DEVICE_APPROVALS_PATH}", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .headers(self.auth_headers())
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("failed to create remote approval at {url}"))?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "control plane rejected approval create with status {}",
+                response.status()
+            );
+        }
+        response
+            .json::<RemoteApprovalStatus>()
+            .await
+            .context("failed to decode approval create response")
+    }
+
+    /// Polls approval status for a device-owned request.
+    pub async fn get_approval_status(&self, id: &str) -> Result<RemoteApprovalStatus> {
+        let url = format!("{}{DEVICE_APPROVALS_PATH}/{id}", self.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await
+            .with_context(|| format!("failed to poll remote approval at {url}"))?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "control plane rejected approval poll with status {}",
+                response.status()
+            );
+        }
+        response
+            .json::<RemoteApprovalStatus>()
+            .await
+            .context("failed to decode approval status response")
+    }
+
+    /// Atomically consumes an APPROVED remote approval with the live action digest.
+    pub async fn consume_approval(
+        &self,
+        id: &str,
+        action_digest: &str,
+    ) -> Result<RemoteApprovalStatus> {
+        let url = format!("{}{DEVICE_APPROVALS_PATH}/{id}/consume", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .headers(self.auth_headers())
+            .json(&serde_json::json!({ "action_digest": action_digest }))
+            .send()
+            .await
+            .with_context(|| format!("failed to consume remote approval at {url}"))?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "control plane rejected approval consume with status {}",
+                response.status()
+            );
+        }
+        response
+            .json::<RemoteApprovalStatus>()
+            .await
+            .context("failed to decode approval consume response")
     }
 
     fn load_threat_intel_fallback(&self) -> Result<(ThreatIntelFeed, ThreatIntelSyncSource)> {
