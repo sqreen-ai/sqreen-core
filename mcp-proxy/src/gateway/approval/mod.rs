@@ -21,6 +21,7 @@
 
 mod context;
 mod grant;
+mod remote;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -34,6 +35,10 @@ pub use grant::{
     session_approval_safe, ActionBinding, ApprovalGrant, ApprovalGrantStore, ApprovalHistoryEntry,
     ApprovalHistoryEvent, ApprovalScope, ApprovalVerdict, GrantAuthorization, GrantRejectReason,
     DEFAULT_ONCE_TTL, DEFAULT_SESSION_TTL,
+};
+pub use remote::{
+    select_approval_engine, ApprovalMode, RemoteApprovalEngine, APPROVAL_MODE_ENV,
+    DEFAULT_REMOTE_POLL_INTERVAL,
 };
 
 use super::decision::Decision;

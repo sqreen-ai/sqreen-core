@@ -78,11 +78,13 @@ use std::time::Instant;
 use chrono::Utc;
 
 pub use approval::{
-    session_approval_safe, ActionBinding, AllowAllApprovalEngine, ApprovalContext, ApprovalEngine,
-    ApprovalFuture, ApprovalGrant, ApprovalGrantStore, ApprovalHistoryEntry, ApprovalHistoryEvent,
-    ApprovalOutcome, ApprovalRequest, ApprovalScope, ApprovalVerdict, DenyAllApprovalEngine,
-    GrantAuthorization, GrantRejectReason, TerminalApprovalEngine, TimeoutApprovalEngine,
-    UnavailableApprovalEngine, DEFAULT_ONCE_TTL, DEFAULT_SESSION_TTL, DEFAULT_TIMED_APPROVAL,
+    select_approval_engine, session_approval_safe, ActionBinding, AllowAllApprovalEngine,
+    ApprovalContext, ApprovalEngine, ApprovalFuture, ApprovalGrant, ApprovalGrantStore,
+    ApprovalHistoryEntry, ApprovalHistoryEvent, ApprovalMode, ApprovalOutcome, ApprovalRequest,
+    ApprovalScope, ApprovalVerdict, DenyAllApprovalEngine, GrantAuthorization, GrantRejectReason,
+    RemoteApprovalEngine, TerminalApprovalEngine, TimeoutApprovalEngine, UnavailableApprovalEngine,
+    APPROVAL_MODE_ENV, DEFAULT_ONCE_TTL, DEFAULT_REMOTE_POLL_INTERVAL, DEFAULT_SESSION_TTL,
+    DEFAULT_TIMED_APPROVAL,
 };
 pub use audit::{
     AuditError, AuditEvent, AuditSink, CloudAuditSink, CompositeAuditSink, FailingAuditSink,

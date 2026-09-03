@@ -50,6 +50,8 @@ Self-asserted identity may **increase** restriction (Deny / Confirm / risk) but 
 
 Approval fingerprints include device id, organization id, agent trust, and bound agent id (when present). Spoofed labels on another device cannot replay a Bound agent's grant.
 
+Remote approvals (`SQREEN_APPROVAL_MODE=remote|auto`) send the same ActionBinding digest to the control plane; consume is device-scoped and single-use. See [REMOTE_APPROVALS.md](./REMOTE_APPROVALS.md).
+
 ## Telemetry / SOC / SIEM
 
 Events carry `agent_trust`, `agent_identity_source`, `agent_bound_id`, and parallel user/session trust fields so analysts can distinguish Bound vs Self-reported labels.
