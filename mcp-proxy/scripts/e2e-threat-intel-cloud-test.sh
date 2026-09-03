@@ -8,13 +8,17 @@ POLICY="${MCP_POLICY_PATH:-${ROOT}/mcp-proxy/mcp-policy.yaml}"
 CP_DIR="${ROOT}/mcp-control-plane"
 DB="$(mktemp)"
 CP_PID=""
+downstream=""
+log_file=""
 
 cleanup() {
   if [[ -n "$CP_PID" ]]; then
     kill "$CP_PID" 2>/dev/null || true
     wait "$CP_PID" 2>/dev/null || true
   fi
-  rm -f "$DB" "$downstream" "$log_file" 2>/dev/null || true
+  rm -f "$DB"
+  [[ -n "$downstream" ]] && rm -f "$downstream"
+  [[ -n "$log_file" ]] && rm -f "$log_file"
 }
 trap cleanup EXIT
 
@@ -25,8 +29,18 @@ fi
 
 export MCP_CONTROL_PLANE_ADDR="127.0.0.1:18081"
 export MCP_DB_PATH="$DB"
+export SQREEN_ENV="${SQREEN_ENV:-test}"
+export SQREEN_ALLOW_INSECURE_DEV_TOKENS="${SQREEN_ALLOW_INSECURE_DEV_TOKENS:-1}"
 export MCP_DEVICE_TOKENS="dev-device-token-change-me"
+export SQREEN_ENABLE_LEGACY_ADMIN_AUTH=true
+export SQREEN_ALLOW_INSECURE_DEV_TOKENS="${SQREEN_ALLOW_INSECURE_DEV_TOKENS:-1}"
+export SQREEN_ENV="${SQREEN_ENV:-test}"
 export MCP_ADMIN_TOKENS="dev-admin-token-change-me"
+# Fail-closed signed policy: CP refuses to start without a signer + bootstrap seed.
+export SQREEN_POLICY_SIGNING_KEY_PATH="${SQREEN_POLICY_SIGNING_KEY_PATH:-$ROOT/mcp-proxy/tests/policy_integrity/fixtures/test-policy-signing.key}"
+export SQREEN_POLICY_SIGNING_KEY_ID="${SQREEN_POLICY_SIGNING_KEY_ID:-sqreen-policy-ed25519-test}"
+# Edge must trust the test signing key used by this harness (never in production).
+export SQREEN_POLICY_ALLOW_TEST_KEYS="${SQREEN_POLICY_ALLOW_TEST_KEYS:-1}"
 
 CP_BIN="${MCP_CONTROL_PLANE_BIN:-}"
 if [[ -n "$CP_BIN" && -x "$CP_BIN" ]]; then

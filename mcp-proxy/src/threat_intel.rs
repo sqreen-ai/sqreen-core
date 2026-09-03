@@ -6,7 +6,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -20,8 +20,8 @@ pub const DEFAULT_THREAT_INTEL_FILE: &str = "threat-intel.txt";
 /// Minimum interval between control-plane threat-intel sync attempts.
 pub const THREAT_INTEL_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Risk score for IOC matches — always exceeds default block thresholds.
-pub const IOC_BLOCK_SCORE: u8 = 100;
+/// Risk score bonus applied when an IOC match is detected.
+pub const IOC_RISK_PENALTY: u8 = 50;
 
 /// Telemetry marker appended for control-plane ingest when an IOC hits.
 pub const TELEMETRY_IOC_MATCH: &str = "THREAT_INTEL_IOC_MATCH";
@@ -37,6 +37,12 @@ pub struct ThreatIntelFeed {
 #[derive(Debug, Clone)]
 pub struct ThreatIntelMatcher {
     indicators: Vec<String>,
+}
+
+impl Default for ThreatIntelMatcher {
+    fn default() -> Self {
+        Self::from_indicators(std::iter::empty())
+    }
 }
 
 impl ThreatIntelMatcher {
@@ -108,6 +114,14 @@ impl ThreatIntelMatcher {
     pub fn matches_payload(&self, params_json: &str) -> bool {
         self.matches_ioc(params_json)
     }
+
+    /// Scans a normalized agent action for IOC hits.
+    ///
+    /// Matches against the action's canonical payload, so detection is unchanged from
+    /// [`ThreatIntelMatcher::matches_payload`].
+    pub fn matches_action(&self, action: &crate::action::AgentAction) -> bool {
+        self.matches_ioc(action.canonical_params_json())
+    }
 }
 
 /// Thread-safe, periodically refreshed threat-intel snapshot.
@@ -133,19 +147,19 @@ impl ThreatIntelStore {
     }
 
     /// Returns the current compiled matcher.
+    ///
+    /// Recovers a poisoned lock rather than substituting an empty matcher, which would
+    /// silently switch off indicator detection for the rest of the process because some
+    /// unrelated task panicked.
     pub fn snapshot(&self) -> ThreatIntelMatcher {
         self.matcher
             .read()
-            .ok()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|| ThreatIntelMatcher::from_indicators([] as [&str; 0]))
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Reloads indicators when the refresh interval has elapsed.
-    pub async fn refresh_if_stale(
-        &self,
-        cloud_client: Option<&crate::cloud_client::CloudClient>,
-    ) {
+    pub async fn refresh_if_stale(&self, cloud_client: Option<&crate::cloud_client::CloudClient>) {
         let stale = self
             .last_refresh
             .read()
@@ -161,9 +175,7 @@ impl ThreatIntelStore {
             match client.fetch_latest_threat_intel().await {
                 Ok((feed, source)) => {
                     let label = match source {
-                        crate::cloud_client::ThreatIntelSyncSource::ControlPlane => {
-                            "control plane"
-                        }
+                        crate::cloud_client::ThreatIntelSyncSource::ControlPlane => "control plane",
                         crate::cloud_client::ThreatIntelSyncSource::Cache => "cache",
                         crate::cloud_client::ThreatIntelSyncSource::LocalFile => "local file",
                     };
@@ -184,12 +196,31 @@ impl ThreatIntelStore {
             local
         };
 
-        if let Ok(mut guard) = self.matcher.write() {
+        // A refresh that produced fewer indicators than are already loaded means the feed
+        // shrank — a deleted local file, a control plane serving an empty set. Reported
+        // rather than applied quietly, because losing detections is indistinguishable from
+        // having none unless somebody says so.
+        {
+            let mut guard = self
+                .matcher
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            if merged.indicator_count() < guard.indicator_count() {
+                eprintln!(
+                    "mcp-proxy: threat-intel refresh reduced indicators from {} to {}",
+                    guard.indicator_count(),
+                    merged.indicator_count()
+                );
+            }
+
             *guard = merged;
         }
-        if let Ok(mut guard) = self.last_refresh.write() {
-            *guard = Instant::now();
-        }
+
+        *self
+            .last_refresh
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
     }
 }
 
@@ -281,25 +312,16 @@ mod tests {
     #[test]
     fn merge_remote_deduplicates_indicators() {
         let local = ThreatIntelMatcher::from_indicators(["evil-c2.example"]);
-        let merged = local.merge_remote(&[
-            "evil-c2.example".to_string(),
-            "bad.host".to_string(),
-        ]);
+        let merged = local.merge_remote(&["evil-c2.example".to_string(), "bad.host".to_string()]);
         assert_eq!(merged.indicator_count(), 2);
         assert!(merged.matches_ioc("https://bad.host/x"));
     }
 
     #[test]
     fn loads_indicators_from_file() {
-        let path = env::temp_dir().join(format!(
-            "mcp-proxy-ioc-{}",
-            std::process::id()
-        ));
-        fs::write(
-            &path,
-            "# comment\nbad.domain\n\n# another\n10.0.0.99\n",
-        )
-        .expect("write ioc file");
+        let path = env::temp_dir().join(format!("mcp-proxy-ioc-{}", std::process::id()));
+        fs::write(&path, "# comment\nbad.domain\n\n# another\n10.0.0.99\n")
+            .expect("write ioc file");
 
         let matcher = ThreatIntelMatcher::from_file(&path);
         let _ = fs::remove_file(&path);
@@ -315,12 +337,11 @@ mod tests {
 
     #[test]
     fn from_blacklist_compiles_and_matches_payload_values() {
-        let matcher = ThreatIntelMatcher::from_blacklist(&[
-            "pastebin.com",
-            "192.168.99.1",
-        ]);
+        let matcher = ThreatIntelMatcher::from_blacklist(&["pastebin.com", "192.168.99.1"]);
         assert!(matcher.matches_ioc(r#"{"arguments":{"url":"https://pastebin.com/raw/abc"}}"#));
-        assert!(matcher.matches_payload(r#"{"name":"fetch","arguments":{"target":"192.168.99.1"}}"#));
+        assert!(
+            matcher.matches_payload(r#"{"name":"fetch","arguments":{"target":"192.168.99.1"}}"#)
+        );
         assert!(!matcher.matches_ioc("benign.local"));
     }
 
@@ -330,4 +351,3 @@ mod tests {
         assert_eq!(store.snapshot().indicator_count(), 1);
     }
 }
-

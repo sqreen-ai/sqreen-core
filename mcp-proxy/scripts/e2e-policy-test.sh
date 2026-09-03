@@ -28,14 +28,17 @@ for line in sys.stdin:
 PY
 chmod +x "$downstream"
 
-blocked_frame='{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"~/.ssh/id_rsa"}}}'
-blocked_get_file_info='{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"get_file_info","arguments":{"path":"/Users/seddik/.ssh/id_rsa"}}}'
+blocked_frame='{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/sqreen-demo.ssh/id_rsa"}}}'
+blocked_get_file_info='{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"get_file_info","arguments":{"path":"/tmp/sqreen-demo.ssh/id_rsa"}}}'
+allowed_frame='{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/sqreen-demo-ok.txt"}}}'
 output="$(mktemp)"
 
 export MCP_POLICY_PATH="$POLICY"
 export MCP_PROXY_LOG="${TMPDIR:-/tmp}/mcp-proxy-e2e.log"
 # When set, mcp-proxy loads policy from control plane (matches Cursor mcp.json).
 export MCP_CONTROL_PLANE_URL="${MCP_CONTROL_PLANE_URL:-}"
+export SQREEN_ENV="${SQREEN_ENV:-test}"
+export SQREEN_ALLOW_INSECURE_DEV_TOKENS="${SQREEN_ALLOW_INSECURE_DEV_TOKENS:-1}"
 export MCP_DEVICE_TOKEN="${MCP_DEVICE_TOKEN:-dev-device-token-change-me}"
 
 set +e
@@ -54,7 +57,7 @@ wait "$proxy_pid" 2>/dev/null || true
 set -e
 
 if grep -q 'access denied\|blocked\|error' "$output"; then
-  echo "✔  policy blocked ~/.ssh read_file (tools/call id=42)"
+  echo "✔  policy blocked synthetic .ssh read_file (tools/call id=42)"
   PASS=1
 else
   echo "✖  expected block response for read_file, got:" >&2
@@ -76,15 +79,14 @@ kill "$proxy_pid" 2>/dev/null || true
 wait "$proxy_pid" 2>/dev/null || true
 set -e
 
-if grep -q 'get_file_info.*blocked\|blocked.*get_file_info' "$output_info"; then
-  echo "✔  policy blocked .ssh get_file_info (tools/call id=43)"
+if grep -q 'get_file_info.*blocked\|blocked.*get_file_info\|blocked by mcp-proxy' "$output_info"; then
+  echo "✔  policy blocked synthetic .ssh get_file_info (tools/call id=43)"
 else
   echo "✖  expected block response for get_file_info, got:" >&2
   cat "$output_info" >&2
   exit 1
 fi
 
-allowed_frame='{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp"}}}'
 output2="$(mktemp)"
 
 set +e
@@ -101,7 +103,7 @@ wait "$proxy_pid" 2>/dev/null || true
 set -e
 
 if grep -q '"id":99' "$output2"; then
-  echo "✔  allowed /tmp read forwarded (tools/call id=99)"
+  echo "✔  allowed /tmp demo path forwarded (tools/call id=99)"
 else
   echo "✖  expected passthrough for allowed path, got:" >&2
   cat "$output2" >&2

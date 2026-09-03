@@ -19,8 +19,16 @@ trap cleanup EXIT
 
 export MCP_CONTROL_PLANE_ADDR="127.0.0.1:18080"
 export MCP_DB_PATH="$DB"
+export SQREEN_ENV="${SQREEN_ENV:-test}"
+export SQREEN_ALLOW_INSECURE_DEV_TOKENS="${SQREEN_ALLOW_INSECURE_DEV_TOKENS:-1}"
 export MCP_DEVICE_TOKENS="dev-device-token-change-me"
+export SQREEN_ENABLE_LEGACY_ADMIN_AUTH=true
+export SQREEN_ALLOW_INSECURE_DEV_TOKENS="${SQREEN_ALLOW_INSECURE_DEV_TOKENS:-1}"
+export SQREEN_ENV="${SQREEN_ENV:-test}"
 export MCP_ADMIN_TOKENS="dev-admin-token-change-me"
+# Fail-closed signed policy: CP refuses to start without a signer + bootstrap seed.
+export SQREEN_POLICY_SIGNING_KEY_PATH="${SQREEN_POLICY_SIGNING_KEY_PATH:-$ROOT/mcp-proxy/tests/policy_integrity/fixtures/test-policy-signing.key}"
+export SQREEN_POLICY_SIGNING_KEY_ID="${SQREEN_POLICY_SIGNING_KEY_ID:-sqreen-policy-ed25519-test}"
 
 CP_BIN="${MCP_CONTROL_PLANE_BIN:-}"
 if [[ -n "$CP_BIN" && -x "$CP_BIN" ]]; then
@@ -65,8 +73,10 @@ if ! printf '%s' "$stream" | grep -q 'cursor_hook:beforeShellExecution'; then
   exit 1
 fi
 
-if ! printf '%s' "$stream" | grep -qE 'id_rsa|\\.ssh/'; then
+# Pattern labels are short names (e.g. "ssh"); the raw path is not echoed into the stream.
+if ! printf '%s' "$stream" | grep -qE 'id_rsa|\\.ssh/|"pattern_matched":"ssh"'; then
   echo "✖  expected sensitive-path pattern in telemetry stream" >&2
+  echo "$stream" >&2
   exit 1
 fi
 

@@ -2,6 +2,9 @@
 //!
 //! Maintains a bounded ring buffer of recent tool names and flags filesystem
 //! reconnaissance followed by outbound network execution wrappers.
+//!
+//! Kept as a focused detector input for [`super::detectors::ExfiltrationChainDetector`]
+//! and for the legacy risk-stage gate.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -15,7 +18,11 @@ pub const MIN_FILESYSTEM_PROBES: usize = 2;
 /// Telemetry marker for behavioral exfiltration chain detections.
 pub const TELEMETRY_BEHAVIORAL_CHAIN: &str = "BEHAVIORAL_CHAIN_ANOMALY";
 
-const FILESYSTEM_TOOLS: &[&str] = &[
+/// Filesystem tool names that count as reconnaissance for chain detection.
+///
+/// Public so [`crate::classify`] can assert its own taxonomy stays a superset of this list;
+/// the two are separate today because collapsing them would change detection outcomes.
+pub const FILESYSTEM_TOOLS: &[&str] = &[
     "read_file",
     "read_text_file",
     "read_media_file",
@@ -27,20 +34,15 @@ const FILESYSTEM_TOOLS: &[&str] = &[
     "directory_tree",
 ];
 
-const NETWORK_TOOLS: &[&str] = &["fetch", "http_request", "http_get", "http_post"];
+/// Tool names that perform outbound network requests directly.
+pub const NETWORK_TOOLS: &[&str] = &["fetch", "http_request", "http_get", "http_post"];
 
-const SHELL_TOOLS: &[&str] = &["execute_bash", "run_terminal_cmd"];
+/// Tool names that execute shell commands.
+pub const SHELL_TOOLS: &[&str] = &["execute_bash", "run_terminal_cmd"];
 
 /// Substrings that indicate outbound network activity inside shell tool params.
 const NETWORK_PARAM_MARKERS: &[&str] = &[
-    "curl",
-    "wget",
-    "http://",
-    "https://",
-    "scp ",
-    "nc ",
-    "ncat",
-    "fetch(",
+    "curl", "wget", "http://", "https://", "scp ", "nc ", "ncat", "fetch(",
 ];
 
 /// Thread-safe sliding window of recent MCP tool invocations for one proxy session.
@@ -92,6 +94,16 @@ impl SessionTracker {
             .count();
 
         fs_calls >= MIN_FILESYSTEM_PROBES
+    }
+
+    /// Records a normalized action after evaluation completes.
+    pub fn record_action(&self, action: &crate::action::AgentAction) {
+        self.record(action.tool_name());
+    }
+
+    /// [`SessionTracker::verify_behavioral_chain`] for a normalized action.
+    pub fn verify_action_chain(&self, action: &crate::action::AgentAction) -> bool {
+        self.verify_behavioral_chain(action.tool_name(), action.canonical_params_json())
     }
 
     /// Returns a snapshot of the current ring buffer (newest last).
@@ -159,10 +171,8 @@ mod tests {
         let tracker = SessionTracker::new(10);
         tracker.record("read_file");
         tracker.record("list_directory");
-        assert!(tracker.verify_behavioral_chain(
-            "fetch",
-            r#"{"arguments":{"url":"https://example.com"}}"#
-        ));
+        assert!(tracker
+            .verify_behavioral_chain("fetch", r#"{"arguments":{"url":"https://example.com"}}"#));
     }
 
     #[test]
@@ -196,10 +206,8 @@ mod tests {
     fn ignores_network_tool_without_prior_probes() {
         let tracker = SessionTracker::new(10);
         tracker.record("read_file");
-        assert!(!tracker.verify_behavioral_chain(
-            "fetch",
-            r#"{"arguments":{"url":"https://example.com"}}"#
-        ));
+        assert!(!tracker
+            .verify_behavioral_chain("fetch", r#"{"arguments":{"url":"https://example.com"}}"#));
     }
 
     #[test]
