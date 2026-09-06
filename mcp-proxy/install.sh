@@ -417,7 +417,7 @@ installed_proxy_version() {
   fi
   local raw
   raw="$("$bin" --version 2>/dev/null || true)"
-  # Expected: "mcp-proxy 0.1.9"
+  # Expected: "mcp-proxy 0.1.12"
   python3 - "$raw" <<'PY'
 import re, sys
 raw = sys.argv[1]
