@@ -521,7 +521,7 @@ async fn enrichment_reaches_the_audit_record_without_touching_the_verdict() {
 /* Session behavior across the pipeline                               */
 /* ------------------------------------------------------------------ */
 
-/// The behavioral chain detector needs the pipeline to record actions as they pass.
+/// Enterprise builds escalate filesystem-probe → network chains; open-core does not.
 #[tokio::test]
 async fn a_filesystem_probe_chain_escalates_a_later_network_call() {
     let gateway = GatewayBuilder::default()
@@ -549,13 +549,25 @@ async fn a_filesystem_probe_chain_escalates_a_later_network_call() {
         ))
         .await;
 
-    assert_eq!(exfil.decision, Decision::Deny);
-    assert!(exfil.has_reason(ReasonCode::BehavioralChainAnomaly));
-    assert_eq!(
-        exfil.primary_detail(),
-        Some("BEHAVIORAL_CHAIN_ANOMALY: operator denied exfiltration-risk tool chain"),
-        "the marker the e2e suite greps for must be preserved"
-    );
+    #[cfg(feature = "enterprise")]
+    {
+        assert_eq!(exfil.decision, Decision::Deny);
+        assert!(exfil.has_reason(ReasonCode::BehavioralChainAnomaly));
+        assert_eq!(
+            exfil.primary_detail(),
+            Some("BEHAVIORAL_CHAIN_ANOMALY: operator denied exfiltration-risk tool chain"),
+            "the marker the e2e suite greps for must be preserved"
+        );
+    }
+    #[cfg(not(feature = "enterprise"))]
+    {
+        assert_eq!(
+            exfil.decision,
+            Decision::Allow,
+            "open-core has no exfiltration-chain detector; benign fetch remains Allow"
+        );
+        assert!(!exfil.has_reason(ReasonCode::BehavioralChainAnomaly));
+    }
 }
 
 /* ------------------------------------------------------------------ */
