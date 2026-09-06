@@ -34,7 +34,7 @@ tools: []                  # legacy per-tool actions + block_patterns
 | `enforce` | Matched effects block, require approval, or redact as configured. |
 | `audit` | Evaluate and record what **would** happen; policy alone does not deny (except redaction and unevaluable payloads). Gateway adds `PolicyAuditOnly` reason with the simulated decision. |
 
-Use `audit` to dry-run enterprise guardrails before enforcement.
+Use `audit` to dry-run guardrails before enforcement.
 
 ## Normalized rules (`schema_version: "2026.3"`)
 
@@ -59,7 +59,9 @@ rules:
 | `require_approval` | Escalate to approval stage |
 | `redact` | Rewrite configured secret keys, then allow (legacy) |
 
-Approval **channel** (local TTY vs remote control plane) is selected by edge env `SQREEN_APPROVAL_MODE` (`local` \| `remote` \| `auto`), not per-rule today. See [REMOTE_APPROVALS.md](./REMOTE_APPROVALS.md). Per-rule `approval_mode` is a planned schema extension.
+Standalone Core resolves `require_approval` via the **local** approval channel
+(TTY / stdin by default). Managed policy distribution and remote approval
+workflows are provided by Sqreen Enterprise and are not documented here.
 
 ### Match fields
 
@@ -67,7 +69,7 @@ Predicates are flat key/value pairs — no expression language.
 
 **Identity**
 
-- `agent_id` / `agent.label` — label match (legacy; Allow/Redact that depend only on these require Bound/Authenticated agent trust — see [EXECUTION_IDENTITY.md](./EXECUTION_IDENTITY.md))
+- `agent_id` / `agent.label` — label match (legacy; Allow/Redact that depend only on these require Bound/Authenticated agent trust)
 - `agent.bound_id` / `agent.id` — registered agent id when Bound
 - `agent.trust` — `self_asserted` | `bound` | `authenticated` | `derived`
 - `agent_type`, `environment`, `workspace_id`
@@ -125,7 +127,7 @@ Legacy sections compile into the same list with default priorities:
 
 ```yaml
 schema_version: "2026.3"
-version: enterprise-guardrails
+version: local-guardrails
 mode: enforce
 global:
   redact_keys: []

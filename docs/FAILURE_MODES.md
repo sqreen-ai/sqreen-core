@@ -1,10 +1,8 @@
 # Failure modes
 
-> Broader threat model, trust boundaries, and known gaps: **[THREAT_MODEL.md](./THREAT_MODEL.md)**.
+What Sqreen Core does when one of its own security controls breaks.
 
-What Sqreen does when one of its own security controls breaks.
-
-This is the authoritative reference for that question. The matrix below is mirrored in the
+This is the authoritative public reference for that question. The matrix below is mirrored in the
 module documentation of `mcp-proxy/src/gateway/failure.rs` and asserted by
 `mcp-proxy/tests/failure_modes.rs`; if the three ever disagree, one of them is a bug.
 
@@ -48,7 +46,7 @@ action cannot end up allowed by default through a second failure.
 | Subsystem | Failure it reports | Default | Rationale |
 |---|---|---|---|
 | `normalization` | Malformed provider payload, unknown action type, unsupported provider event | **FAIL_CLOSED** | An action nobody can parse is an action nobody can evaluate. |
-| `policy_missing` | No declarative policy loaded | **FAIL_CLOSED** | Default enforcement posture is `enforcing`. An absent policy must not silently become allow-all. Opt into FAIL_OPEN only via `SQREEN_ENFORCEMENT_POSTURE=development` (loud warning + structured reason). Managed fleets use `managed` (also FAIL_CLOSED; distinguishes `REMOTE_UNAVAILABLE`). |
+| `policy_missing` | No declarative policy loaded | **FAIL_CLOSED** | Default enforcement posture is `enforcing`. An absent policy must not silently become allow-all. Opt into FAIL_OPEN only via `SQREEN_ENFORCEMENT_POSTURE=development` (loud warning + structured reason). |
 | `policy_engine` | Corrupt policy, regex failure, redaction produced non-UTF-8 | **FAIL_CLOSED** | A policy that exists and cannot be applied is an enforcement outage, not an absence of rules. |
 | `policy_payload` | Arguments unparseable, so no rule could match against them | **FAIL_CLOSED** | A payload the inspector cannot read is exactly the payload an attacker wants it to receive. |
 | `policy_extension` | Wasm trap, fuel exhaustion, host error | **FAIL_CLOSED** | The extension was installed to make a decision. |
@@ -56,8 +54,8 @@ action cannot end up allowed by default through a second failure.
 | `dlp_scanner` | Matched sensitive data, then failed to produce the masked payload | **FAIL_CLOSED** | The only two outcomes are "forward the unmasked secret" and "stop". |
 | `threat_intel` | Indicator set could not be read | **DEGRADE_SAFELY** | Absence of indicators is not evidence of safety, but it is not grounds to stop everything either. |
 | `approval` | Approver unreachable, prompt failed, prompt timed out | **FAIL_CLOSED** | An action awaiting a judgment that never came has not been judged. |
-| `audit` | Sink rejected the event | **FAIL_OPEN** | See [below](#why-audit-and-control-plane-failures-are-the-open-ones). |
-| `control_plane` | Control plane unreachable, telemetry dispatch failed | **FAIL_OPEN** | See [below](#why-audit-and-control-plane-failures-are-the-open-ones). |
+| `audit` | Sink rejected the event | **FAIL_OPEN** | See [below](#why-audit-and-optional-sync-failures-are-the-open-ones). |
+| `control_plane` | Optional remote sync/telemetry path failed | **FAIL_OPEN** | See [below](#why-audit-and-optional-sync-failures-are-the-open-ones). Local enforcement still decides. |
 | `internal` | Panic or unclassified error inside a stage | **FAIL_CLOSED** | An unexplained failure in a security control is the least safe thing to guess about. |
 
 ### Presets
@@ -65,7 +63,7 @@ action cannot end up allowed by default through a second failure.
 | Preset | Posture |
 |---|---|
 | `FailurePolicy::default()` | The matrix above. |
-| `FailurePolicy::strict()` | Every subsystem closed, including audit, control plane, and absent policy. |
+| `FailurePolicy::strict()` | Every subsystem closed, including audit and optional remote sync paths, and absent policy. |
 | `FailurePolicy::observe()` | Only a broken approver fails closed. For validating the proxy against production traffic before letting it block, and for restoring pre-hardening behavior during a staged rollout. **Not a security posture.** |
 
 Select one without a code change:
@@ -86,7 +84,7 @@ exists to prevent.
 |---|---|---|
 | Development | `development` / `dev` / `permissive` | FAIL_OPEN + stderr warning + `policy_unavailable` reason (not silent) |
 | Enforcing (default) | `enforcing` / `protected` | FAIL_CLOSED — decision `DENY`, reason `policy_unavailable`, `policy_state` metadata |
-| Managed | `managed` / `fleet` / `enterprise` | FAIL_CLOSED; distinguishes `REMOTE_UNAVAILABLE` from `MISSING` when the control plane and cache are both gone |
+| Managed | `managed` | FAIL_CLOSED; distinguishes remote-unavailable from missing when an optional remote policy source and cache are both gone |
 
 Typed availability states on every outcome: `AVAILABLE`, `MISSING`, `INVALID`, `UNREADABLE`, `STALE`, `REMOTE_UNAVAILABLE`.
 
@@ -98,13 +96,12 @@ export SQREEN_ENFORCEMENT_POSTURE=enforcing   # production / installer default
 Adapters (MCP, OpenAI, Anthropic, Cursor, generic) and the guard facade all go through the
 same gateway; none may override missing-policy behavior independently.
 
-## Why audit and control-plane failures are the open ones
+## Why audit and optional sync failures are the open ones
 
-**Cloud connectivity is never required to make a security decision.** The gateway treats
-the control plane as a *replica, not an oracle*: policy is evaluated from a local snapshot,
-approvals resolve locally, and telemetry is dispatched on a detached task whose failure
-cannot reach the verdict. Enforcement on an offline laptop is identical to enforcement on a
-connected one.
+**Optional remote connectivity is never required to make a security decision.** Core
+evaluates policy from a **local** snapshot, resolves local approvals on-device, and treats
+optional sync/telemetry paths as non-authoritative for the verdict. Enforcement on an
+offline laptop is identical to enforcement when optional sync is available.
 
 Neither failure is ever swallowed. A failed audit adds an `audit_delivery_failed` reason to
 the outcome the caller receives, so "we allowed this and could not log it" is visible in
@@ -118,8 +115,8 @@ FailurePolicy { audit_error: FailureMode::FailClosed, ..FailurePolicy::default()
 
 paired with `GatewayConfig::audit_all_decisions = true`, so routine allows are in scope
 too. Without that flag there is no event to lose on a clean allow, and the mandate has
-nothing to enforce. `GatewayConfig::require_control_plane` is the equivalent for the
-control plane, and is checked before anything else in the pipeline.
+nothing to enforce. `GatewayConfig::require_control_plane` is the equivalent for optional
+remote connectivity, and is checked before anything else in the pipeline.
 
 ## Secrets in error text
 
@@ -189,14 +186,17 @@ depending on one of them — most plausibly the first, if some tool emits payloa
 engine cannot parse — should run `SQREEN_FAILURE_POLICY=observe` and watch for
 `security_failure:` events before switching to the default posture.
 
-## Managed policy sync integrity
+## Signed policy verification failures
 
-When `MCP_CONTROL_PLANE_URL` is set, remote policy must arrive as a signed envelope (docs/POLICY_INTEGRITY.md).
+When Core is asked to activate a **signed** policy envelope, verification is local:
 
 | Failure | Mode |
 |---------|------|
 | Signature / digest / org / rollback rejection | Keep previous verified policy; emit reject event |
-| Control plane unreachable | Last-known-good signed cache if re-verify succeeds (STALE); else fail closed for managed signed path |
+| Signed source unreachable | Last-known-good signed cache if re-verify succeeds (`STALE`); else fail closed for the managed signed path |
 | Expired envelope | Continue enforcing; emit policy_expired (no implicit ALLOW) |
-| Unsigned remote body | Reject (unless explicit non-prod allow) |
+| Unsigned remote body presented as managed sync | Reject (unless an explicit non-production allow is configured) |
+
+Issuance and managed distribution of signed policies are provided separately by Sqreen
+Enterprise; Core’s public contract is verification and fail-closed activation.
 

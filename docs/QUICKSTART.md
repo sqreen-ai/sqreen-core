@@ -1,6 +1,7 @@
 # Sqreen Core — Quickstart
 
-Primary path for design-partner pilots. Every command below matches the real CLI (`mcp-proxy`, alias `sqreen`).
+Local-first runtime enforcement for intercepted AI agent tool calls.
+Every command matches the real CLI (`mcp-proxy`, alias `sqreen`).
 
 ## 1. Install
 
@@ -9,94 +10,89 @@ curl -fsSL https://sqreen.ai/install.sh | bash
 source ~/.config/mcp-proxy/env   # PATH + MCP_POLICY_PATH
 ```
 
-From source:
+The installer **auto-wraps** supported Cursor/IDE MCP configs when it finds them.
 
-```bash
-cd mcp-proxy && cargo build --release
-export PATH="$PWD/target/release:$PATH"
-```
+- `Cursor integration: CONFIGURED` → skip integrate; restart Cursor next
+- `Cursor integration: NOT CONFIGURED` → run step 3
 
-## 2. First protected action (demo)
+`CONFIGURED` wrap ≠ `VERIFIED_ACTIVE`. Install alone does not mean traffic is protected.
+
+## 2. Local demo (policy only)
 
 ```bash
 mcp-proxy demo
-# or: sqreen demo
 ```
 
-Shows **allow → block → confirm/approval** on synthetic paths only (no real secrets, no shell execution).
+Shows **ALLOW → DENY → optional local Confirm** on synthetic `/tmp` paths.
+No Cloud, enrollment, or remote approval is required.
+This proves the local policy control point — not that Cursor traffic is wrapped.
 
-## 3. Protect an agent
-
-**MCP (Cursor / Claude Desktop)** — installer may wrap `mcp.json` automatically. Manual:
+## 3. Integrate Cursor — only if NOT CONFIGURED
 
 ```bash
-mcp-proxy -- run npx -y @modelcontextprotocol/server-filesystem .
+mcp-proxy integrate cursor
 ```
 
-**HTTP agents (OpenAI-compatible):**
+Wraps `~/.cursor/mcp.json` through `mcp-proxy`. Config alone is **CONFIGURED**, not verified.
+
+## 4. Restart / reload
+
+Restart Cursor, or Command Palette → **MCP: Restart Servers** / Reload Window.
+
+## 5. Observe ALLOW (real wrapped traffic)
+
+In Cursor: ask the agent to read `/tmp/sqreen-demo-ok.txt`.
+
+Optional gateway self-check (does **not** mint `VERIFIED_ACTIVE`):
 
 ```bash
-mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.openai.com
-export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+mcp-proxy prove
 ```
 
-## 4. Status and doctor
+## 6. Observe DENY
+
+Ask the agent to read:
+
+```text
+/tmp/sqreen-demo.ssh/id_rsa
+```
+
+Synthetic credential-shaped path under `/tmp` — **not** your real `~/.ssh`.
+Expect a DENY with WHAT / WHY / RULE.
+
+## 7. Local status / audit
 
 ```bash
-mcp-proxy status          # ACTIVE/INACTIVE, policy, posture, cloud, integrations
-mcp-proxy doctor          # PASS / WARN / FAIL with remediation
-mcp-proxy integrations    # Cursor / Claude wrap, control plane, OPENAI_BASE_URL
-mcp-proxy update --check  # compare to signed release channel (no auto-install)
-mcp-proxy version         # or: mcp-proxy --version
+mcp-proxy status
+mcp-proxy integrations
+mcp-proxy support-bundle
 ```
 
-## 5. Optional — enroll for Cloud SOC
+Expect after real wrap traffic:
 
-Mint a device token in the dashboard (Agent Identities), then:
+- Policy: **LOADED**
+- Runtime coverage: **VERIFIED_ACTIVE**
+- Protected traffic: **VERIFIED**
 
-```bash
-mcp-proxy enroll \
-  --control-plane https://YOUR_CONTROL_PLANE \
-  --device-token YOUR_TOKEN \
-  --device-id YOUR_DEVICE_ID
+Local approval defaults to the terminal (`SQREEN_APPROVAL_MODE=local`).
 
-source ~/.config/mcp-proxy/env
-mcp-proxy doctor
-```
-
-The token is written to `~/.config/mcp-proxy/env` with mode `0600` and is **never printed**.
-
-For remote approvals on Confirm / destructive-shaped actions:
-
-```bash
-export SQREEN_APPROVAL_MODE=remote   # or auto
-```
-
-## 6. Support bundle
-
-```bash
-mcp-proxy support-bundle              # writes under /tmp
-mcp-proxy support-bundle --out ./out  # optional path
-```
-
-Inspect the folder before sharing — secrets are redacted as `[SET]` / `[EMPTY]`.
-
-## Smoke test (developers)
+## 8. Developer smoke tests
 
 ```bash
 cd mcp-proxy
-./scripts/pilot-onboarding-smoke.sh
-cargo test --lib pilot -- --nocapture
-cargo test --lib demo -- --nocapture
+cargo test --locked --no-default-features --lib
+bash scripts/e2e-policy-test.sh
+bash scripts/e2e-threat-intel-test.sh
 ```
 
 ## Next reading
 
 | Doc | Purpose |
 |-----|---------|
-| [PILOT_CHECKLIST.md](PILOT_CHECKLIST.md) | Pre-pilot / Day 1 / Week 1 / exit criteria |
-| [PILOT_DEPLOYMENT.md](PILOT_DEPLOYMENT.md) | Self-hosted control plane + dashboard |
-| [DESIGN_PARTNER.md](DESIGN_PARTNER.md) | Recommended pilot profile |
-| [PRIVACY.md](PRIVACY.md) | What stays local vs cloud |
-| [REMOTE_APPROVALS.md](REMOTE_APPROVALS.md) | Remote human gate |
+| [PRIVACY.md](PRIVACY.md) | What stays local |
+| [FAILURE_MODES.md](FAILURE_MODES.md) | Broken-control behavior |
+| [RELEASE_INTEGRITY.md](RELEASE_INTEGRITY.md) | Installer verification |
+| [POLICY_SCHEMA.md](POLICY_SCHEMA.md) | Policy document shape |
 | [../mcp-proxy/README.md](../mcp-proxy/README.md) | Full CLI notes |
+
+Enterprise management and remote workflows are available separately.
