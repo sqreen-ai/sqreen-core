@@ -7,31 +7,22 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::local_env;
+
 /// Serializes tests that mutate process-global env (`HOME`, policy path, etc.).
 #[cfg(test)]
 pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::local_env::test_env_lock()
 }
 
 /// Config directory: `~/.config/mcp-proxy` (or `$XDG_CONFIG_HOME/mcp-proxy`).
 pub fn config_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        let trimmed = xdg.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed).join("mcp-proxy");
-        }
-    }
-    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(home).join(".config/mcp-proxy")
+    local_env::config_dir()
 }
 
 /// Path to the shell env file seeded by install / enroll.
 pub fn env_file_path() -> PathBuf {
-    config_dir().join("env")
+    local_env::env_file_path()
 }
 
 /// Ensures the config directory exists with restrictive permissions when possible.
@@ -74,37 +65,12 @@ pub fn redact_env_value(key: &str, value: &str) -> String {
 
 /// Reads `KEY=VALUE` lines from an env-style file (no shell expansion).
 pub fn read_env_file(path: &Path) -> Result<Vec<(String, String)>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(parse_env_lines(&text))
+    local_env::read_env_file(path)
+        .with_context(|| format!("failed to read {}", path.display()))
 }
 
 pub fn parse_env_lines(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let body = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-        let Some((key, value)) = body.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().to_string();
-        let mut value = value.trim().to_string();
-        if (value.starts_with('"') && value.ends_with('"'))
-            || (value.starts_with('\'') && value.ends_with('\''))
-        {
-            value = value[1..value.len() - 1].to_string();
-        }
-        if !key.is_empty() {
-            out.push((key, value));
-        }
-    }
-    out
+    local_env::parse_env_lines(text)
 }
 
 /// Upserts keys into `~/.config/mcp-proxy/env` and sets mode 0600.
@@ -148,35 +114,20 @@ pub fn upsert_env_file(updates: &[(&str, &str)]) -> Result<PathBuf> {
 }
 
 /// Unix mode bits for a path, if available.
-#[cfg(unix)]
 pub fn file_mode(path: &Path) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o777)
+    local_env::file_mode(path)
 }
 
-#[cfg(not(unix))]
-pub fn file_mode(_path: &Path) -> Option<u32> {
-    None
-}
-
-/// Non-secret org id from env (may be empty).
+/// Non-secret org id from process env or enrollment file (may be empty).
 pub fn org_id_from_env() -> Option<String> {
-    std::env::var(crate::policy::ORG_ID_ENV)
-        .ok()
-        .or_else(|| std::env::var(crate::policy::ORG_ID_ENV_ALT).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    local_env::lookup(crate::policy::ORG_ID_ENV)
+        .or_else(|| local_env::lookup(crate::policy::ORG_ID_ENV_ALT))
 }
 
-/// Non-secret device id from env (may be empty).
+/// Non-secret device id from process env or enrollment file (may be empty).
 pub fn device_id_from_env() -> Option<String> {
-    std::env::var(crate::cloud_client::DEVICE_ID_ENV)
-        .ok()
-        .or_else(|| std::env::var(crate::cloud_client::DEVICE_ID_ENV_LEGACY).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    local_env::lookup(crate::cloud_client::DEVICE_ID_ENV)
+        .or_else(|| local_env::lookup(crate::cloud_client::DEVICE_ID_ENV_LEGACY))
 }
 
 #[cfg(test)]

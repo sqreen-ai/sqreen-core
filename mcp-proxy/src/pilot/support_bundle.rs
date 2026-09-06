@@ -9,7 +9,6 @@ use chrono::Utc;
 use super::config::{
     config_dir, env_file_path, file_mode, read_env_file, redact_env_value,
 };
-use super::doctor::{format_doctor_report, run_doctor_checks};
 use super::integrations::detect_integrations;
 use super::status::collect_status;
 use crate::policy::{resolve_policy_path_for_load, PolicyEngine};
@@ -104,8 +103,9 @@ fn write_redacted_env(base: &Path) -> Result<()> {
 fn write_status(base: &Path) -> Result<()> {
     let s = collect_status();
     let body = format!(
-        "protection: {}\npolicy_path: {}\npolicy_version: {}\ntool_rules: {}\nposture: {}\norg_id: {}\ndevice_id: {}\ncloud_configured: {}\ncloud_url: {}\ndevice_token: {}\napproval_mode: {}\n",
-        s.protection.as_str(),
+        "policy: {}\npolicy_signed: {}\npolicy_path: {}\npolicy_version: {}\ntool_rules: {}\nruntime_coverage: {}\nprotected_traffic: {}\nlast_protected: {}\ncloud_enrollment: {}\ncloud_connection: {}\nlast_cloud: {}\ncloud_url: {}\ndevice_token: {}\nposture: {}\norg_id: {}\ndevice_id: {}\napproval_mode: {}\n",
+        s.policy.as_str(),
+        s.policy_signed.as_str(),
         s.policy_path
             .as_ref()
             .map(|p| p.display().to_string())
@@ -114,16 +114,25 @@ fn write_status(base: &Path) -> Result<()> {
         s.tool_rules
             .map(|n| n.to_string())
             .unwrap_or_else(|| "(none)".into()),
-        s.posture,
-        s.org_id.as_deref().unwrap_or("(unset)"),
-        s.device_id.as_deref().unwrap_or("(unset)"),
-        s.cloud_configured,
+        s.runtime_coverage.as_str(),
+        if s.protected_traffic_verified {
+            "VERIFIED"
+        } else {
+            "NOT_YET_VERIFIED"
+        },
+        s.last_protected_age.as_deref().unwrap_or("(none)"),
+        s.cloud_enrollment.as_str(),
+        s.cloud_connection.as_str(),
+        s.last_cloud_age.as_deref().unwrap_or("(none)"),
         s.cloud_url.as_deref().unwrap_or("(unset)"),
         if s.device_token_present {
             "[SET]"
         } else {
             "[EMPTY]"
         },
+        s.posture,
+        s.org_id.as_deref().unwrap_or("(unset)"),
+        s.device_id.as_deref().unwrap_or("(unset)"),
         s.approval_mode,
     );
     fs::write(base.join("status.txt"), body)?;
@@ -171,8 +180,19 @@ fn write_policy_meta(base: &Path) -> Result<()> {
 }
 
 async fn write_doctor(base: &Path) -> Result<()> {
-    let checks = run_doctor_checks(true).await;
-    fs::write(base.join("doctor.txt"), format_doctor_report(&checks))?;
+    #[cfg(feature = "enterprise")]
+    {
+        use crate::enterprise::pilot::doctor::{format_doctor_report, run_doctor_checks};
+        let checks = run_doctor_checks(true).await;
+        fs::write(base.join("doctor.txt"), format_doctor_report(&checks))?;
+    }
+    #[cfg(not(feature = "enterprise"))]
+    {
+        fs::write(
+            base.join("doctor.txt"),
+            "doctor: unavailable in open-core builds (enterprise feature required)\n",
+        )?;
+    }
     Ok(())
 }
 

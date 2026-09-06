@@ -56,6 +56,15 @@ sha256_file() {
 echo "== supply-chain fixtures =="
 mkdir -p "$WORKDIR/artifacts" "$WORKDIR/out" "$WORKDIR/evil" "$WORKDIR/install"
 
+# Prefer checked-in fixtures; generate ephemeral test key when Core extract omits private keys.
+if [[ ! -f "$FIX/test-signing.key" ]]; then
+  echo "generating ephemeral test-signing.key (open-core extract)"
+  mkdir -p "$FIX"
+  "$OPENSSL_BIN" genpkey -algorithm Ed25519 -out "$FIX/test-signing.key" 2>/dev/null \
+    || "$OPENSSL_BIN" genpkey -algorithm ed25519 -out "$FIX/test-signing.key"
+  "$OPENSSL_BIN" pkey -in "$FIX/test-signing.key" -pubout -out "$FIX/test-signing.pub" 2>/dev/null || true
+fi
+
 # Fake platform archives (content is irrelevant; digests are what matter).
 for name in \
   mcp-proxy-darwin-aarch64.tar.gz \
@@ -65,13 +74,11 @@ for name in \
 do
   printf 'fake-binary-%s' "$name" >"$WORKDIR/bin"
   tar -czf "$WORKDIR/artifacts/$name" -C "$WORKDIR" bin
-  # Retag member as mcp-proxy for extraction tests on one platform.
 done
 
 # Proper archive with mcp-proxy member for extraction tests.
 printf 'trusted-payload\n' >"$WORKDIR/mcp-proxy"
 tar -czf "$WORKDIR/artifacts/mcp-proxy-darwin-aarch64.tar.gz" -C "$WORKDIR" mcp-proxy
-# Rebuild other three as mcp-proxy too for sign script completeness.
 for name in mcp-proxy-darwin-x86_64.tar.gz mcp-proxy-linux-aarch64.tar.gz mcp-proxy-linux-x86_64.tar.gz; do
   printf 'trusted-payload-%s\n' "$name" >"$WORKDIR/mcp-proxy"
   tar -czf "$WORKDIR/artifacts/$name" -C "$WORKDIR" mcp-proxy
@@ -197,6 +204,9 @@ mv "$WORKDIR/out/release-manifest.json.bak" "$WORKDIR/out/release-manifest.json"
 
 echo "== 14. public installer matches canonical =="
 assert_ok "installer sync check" bash "$ROOT/scripts/check-installer-sync.sh"
+
+echo "== 14b. Day-1 install messaging / wrap state =="
+assert_ok "day1 install messaging" bash "$ROOT/scripts/test-day1-install-messaging.sh"
 
 echo "== 15. automatic downgrade rejected =="
 version_is_older() {

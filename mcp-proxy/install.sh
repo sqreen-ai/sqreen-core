@@ -43,12 +43,12 @@ INSECURE_SKIP_VERIFY=0
 INSTALL_DIR="${MCP_PROXY_INSTALL_DIR:-${HOME}/.local/bin}"
 CONFIG_DIR="${MCP_PROXY_CONFIG_DIR:-${HOME}/.config/mcp-proxy}"
 DATA_DIR="${MCP_PROXY_DATA_DIR:-${HOME}/.local/share/mcp-proxy}"
-GITHUB_REPO="${MCP_PROXY_GITHUB_REPO:-sqreen-ai/sqreen}"
+GITHUB_REPO="${MCP_PROXY_GITHUB_REPO:-sqreen-ai/sqreen-core}"
 SQREEN_RELEASE_BASE="${MCP_PROXY_SQREEN_RELEASE_URL:-https://sqreen.ai/releases}"
 RELEASE_BASE="${MCP_PROXY_RELEASE_URL:-https://github.com/${GITHUB_REPO}/releases}"
 SOURCE_BRANCH="${MCP_PROXY_SOURCE_BRANCH:-main}"
 INSTALL_SCRIPT_DIR=""
-INSTALLER_REVISION="7"
+INSTALLER_REVISION="8"
 
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   INSTALL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,7 +99,7 @@ Options:
 Environment:
   MCP_PROXY_SQREEN_RELEASE_URL  Primary release mirror (default: sqreen.ai/releases)
   MCP_PROXY_RELEASE_URL   GitHub releases fallback base
-  MCP_PROXY_GITHUB_REPO   owner/repo for source fallback (default: sqreen-ai/sqreen)
+  MCP_PROXY_GITHUB_REPO   owner/repo for source fallback (default: sqreen-ai/sqreen-core)
   MCP_PROXY_INSTALL_DIR   Binary destination (default: ~/.local/bin)
   MCP_PROXY_CONFIG_DIR    Config directory (default: ~/.config/mcp-proxy)
   SQREEN_OPENSSL_BIN      OpenSSL 3 binary with Ed25519 (optional override)
@@ -1006,7 +1006,7 @@ IOC
       info "[dry-run] would create ${env_file}"
     else
       tee "$env_file" >/dev/null <<ENV
-# mcp-proxy local environment (sourced by your shell or IDE MCP config)
+# mcp-proxy local environment (sourced by your shell; do not put secrets in mcp.json)
 export PATH="${INSTALL_DIR}:\$PATH"
 export MCP_POLICY_PATH="${policy_file}"
 export MCP_THREAT_INTEL_PATH="${threat_intel_file}"
@@ -1015,12 +1015,7 @@ export MCP_RISK_THRESHOLD="70"
 # Secure default: missing policy DENIES. Opt into permissive local DX only consciously:
 #   export SQREEN_ENFORCEMENT_POSTURE=development
 export SQREEN_ENFORCEMENT_POSTURE="enforcing"
-
-# Cloud telemetry + policy sync (optional — leave blank to stay local-only)
-# Do not put long-lived secrets in world-readable files. Prefer 0600 permissions.
-# Obtain MCP_DEVICE_TOKEN via admin mint (POST /api/v1/device-tokens) — never a repo default.
-export MCP_CONTROL_PLANE_URL=""
-export MCP_DEVICE_TOKEN=""
+# Local-first open-core default. Enterprise cloud/remote workflows are available separately.
 ENV
       chmod 0600 "$env_file" 2>/dev/null || true
       success "Created environment file → ${env_file} (mode 0600)"
@@ -1059,7 +1054,7 @@ Uninstall:
 
 Docs:
   https://sqreen.ai/products
-  https://github.com/sqreen-ai/sqreen
+  https://github.com/sqreen-ai/sqreen-core
 README
   fi
 
@@ -1114,6 +1109,18 @@ is_already_wrapped() {
   local file="$1"
   grep -Fq 'mcp-proxy' "$file" 2>/dev/null
 }
+
+# True when path is a Cursor MCP host config (not Claude Desktop).
+is_cursor_mcp_config() {
+  local file="$1"
+  case "$file" in
+    */.cursor/mcp.json|*/Cursor/User/mcp.json|*/cursor/mcp.json) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# CURSOR_MCP_STATE: CONFIGURED | NOT_CONFIGURED | SKIPPED
+CURSOR_MCP_STATE="NOT_CONFIGURED"
 
 backup_config() {
   local file="$1"
@@ -1316,24 +1323,102 @@ hook_ide_configs() {
   step "Hooking IDE / AI host MCP configurations"
 
   local configs file
+  local cursor_seen=0
+  local cursor_ok=0
 
   configs="$(discover_ide_configs)"
   if [ -z "$configs" ]; then
     warn "No supported IDE MCP configs found on this machine"
-    info "Manual wiring example:"
-    printf '%s\n' \
-      '  "command": "'"${INSTALL_DIR}/mcp-proxy"'",' \
-      '  "args": ["--", "run", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path"]'
+    info "Manual wiring: run \`sqreen integrate cursor\` (or mcp-proxy integrate cursor) after Cursor has an mcp.json"
+    CURSOR_MCP_STATE="NOT_CONFIGURED"
     return 0
   fi
 
   while IFS= read -r file || [[ -n "${file:-}" ]]; do
     [[ -n "$file" ]] || continue
     info "Found host config: ${file}"
-    wrap_ide_config "$file" || warn "Failed to patch ${file}"
+    if is_cursor_mcp_config "$file"; then
+      cursor_seen=1
+      if wrap_ide_config "$file"; then
+        cursor_ok=1
+      else
+        warn "Failed to patch Cursor config: ${file}"
+      fi
+    else
+      wrap_ide_config "$file" || warn "Failed to patch ${file}"
+    fi
   done <<EOF
 $configs
 EOF
+
+  if [[ "$cursor_ok" -eq 1 ]]; then
+    CURSOR_MCP_STATE="CONFIGURED"
+  else
+    CURSOR_MCP_STATE="NOT_CONFIGURED"
+    if [[ "$cursor_seen" -eq 1 ]]; then
+      warn "Cursor MCP config was found but could not be wrapped"
+    fi
+  fi
+}
+
+# State-aware Day-1 next steps (CONFIGURED != VERIFIED_ACTIVE).
+print_day1_next_steps() {
+  local cursor_state="${1:-NOT_CONFIGURED}"
+
+  printf "\n"
+  success "Installation complete"
+  info "Binary:  ${INSTALL_DIR}/mcp-proxy"
+  info "Alias:   ${INSTALL_DIR}/sqreen  (same binary)"
+  info "Config:  ${CONFIG_DIR}"
+  info "Logs:    ${DATA_DIR}/mcp-proxy.log"
+  printf "\n"
+  info "Local Sqreen Core is installed."
+  info "CONFIGURED wrap ≠ VERIFIED_ACTIVE — real agent traffic is not verified until a wrapped tools/call is observed."
+  printf "\n"
+
+  case "$cursor_state" in
+    CONFIGURED)
+      info "Cursor integration: CONFIGURED"
+      info "Next (do NOT re-run integrate — already wrapped):"
+      printf "  1. source %s\n" "${CONFIG_DIR}/env"
+      printf "  2. sqreen demo                 # policy self-check only\n"
+      printf "  3. Restart Cursor / reload MCP\n"
+      printf "  4. Ask Cursor to read /tmp/sqreen-demo-ok.txt   # real wrapped tools/call\n"
+      printf "  5. sqreen integrations && sqreen status\n"
+      printf "     # expect wrap CONFIGURED; Runtime coverage VERIFIED_ACTIVE after step 4\n"
+      printf "  6. Ask Cursor to read /tmp/sqreen-demo.ssh/id_rsa  # safe DENY\n"
+      printf "\n"
+      info "Repair / re-wrap later: sqreen integrate cursor"
+      ;;
+    SKIPPED)
+      info "Cursor integration: NOT CONFIGURED (--skip-ide)"
+      info "Next:"
+      printf "  1. source %s\n" "${CONFIG_DIR}/env"
+      printf "  2. sqreen demo\n"
+      printf "  3. sqreen integrate cursor\n"
+      printf "  4. Restart Cursor / reload MCP\n"
+      printf "  5. Ask Cursor to read /tmp/sqreen-demo-ok.txt\n"
+      printf "  6. sqreen status               # expect VERIFIED_ACTIVE after real wrap traffic\n"
+      ;;
+    *)
+      info "Cursor integration: NOT CONFIGURED"
+      info "Next:"
+      printf "  1. source %s\n" "${CONFIG_DIR}/env"
+      printf "  2. sqreen demo\n"
+      printf "  3. sqreen integrate cursor\n"
+      printf "  4. Restart Cursor / reload MCP\n"
+      printf "  5. Ask Cursor to read /tmp/sqreen-demo-ok.txt\n"
+      printf "  6. sqreen status               # expect VERIFIED_ACTIVE after real wrap traffic\n"
+      ;;
+  esac
+
+  printf "\n"
+  info "Optional — gateway self-check (does not mint VERIFIED_ACTIVE): sqreen prove"
+  printf "\n"
+  info "Secondary — HTTP agents:"
+  printf "  sqreen serve --listen 127.0.0.1:8787 --upstream https://api.openai.com\n"
+  printf "  export OPENAI_BASE_URL=http://127.0.0.1:8787/v1\n\n"
+  info "Uninstall tips: ${CONFIG_DIR}/README.txt\n"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1350,31 +1435,18 @@ main() {
   seed_config
   seed_cursor_hooks
 
+  CURSOR_MCP_STATE="NOT_CONFIGURED"
   if [[ "$SKIP_IDE" -eq 0 ]]; then
     hook_ide_configs
   else
     info "Skipping IDE hooking (--skip-ide)"
+    CURSOR_MCP_STATE="SKIPPED"
   fi
 
-  printf "\n"
-  success "Installation complete"
-  info "Binary:  ${INSTALL_DIR}/mcp-proxy"
-  info "Alias:   ${INSTALL_DIR}/sqreen  (same binary)"
-  info "Config:  ${CONFIG_DIR}"
-  info "Logs:    ${DATA_DIR}/mcp-proxy.log"
-  printf "\n"
-  info "See your first protected Agent Action (safe demo):"
-  printf "  source %s\n" "${CONFIG_DIR}/env"
-  printf "  mcp-proxy demo\n"
-  printf "  # or: sqreen demo\n\n"
-  info "Then restart Claude Desktop / Cursor, or run an MCP server:"
-  printf "  mcp-proxy -- run npx -y @modelcontextprotocol/server-filesystem .\n\n"
-  info "OpenAI-compatible HTTP agents:"
-  printf "  mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.openai.com\n"
-  printf "  export OPENAI_BASE_URL=http://127.0.0.1:8787/v1\n\n"
-  info "Anthropic Messages API (same serve process; set base URL in your SDK):\n"
-  printf "  mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.anthropic.com\n\n"
-  info "Uninstall tips: ${CONFIG_DIR}/README.txt\n"
+  print_day1_next_steps "$CURSOR_MCP_STATE"
 }
 
-main "$@"
+# Allow tests to source this file without running main.
+if [[ "${MCP_PROXY_INSTALL_SOURCED:-0}" != "1" ]]; then
+  main "$@"
+fi
