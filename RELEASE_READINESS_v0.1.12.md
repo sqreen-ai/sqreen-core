@@ -4,6 +4,7 @@
 **Date:** 2026-09-06  
 **Base main SHA:** `0d8617c347caa7f404145695a248c40de83d80a4`  
 **Candidate branch:** `release/v0.1.12-prep`  
+**Candidate commit:** `3b76351447958b4bd251e36dfbf30319888bbc94`  
 **Candidate theme:** local-first open-source enforcement runtime
 
 ## Release candidate commit
