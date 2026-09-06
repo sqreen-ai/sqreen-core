@@ -36,7 +36,6 @@ SCAN_PATHS=(
   frontend/app/products
   mcp-proxy/src/main.rs
   mcp-proxy/src/pilot/status.rs
-  mcp-proxy/scripts/pilot-onboarding-smoke.sh
 )
 
 echo "==> checking integration claim phrases"
@@ -67,17 +66,25 @@ for label in "${REQUIRED[@]}"; do
   fi
 done
 
-# Smoke must not treat prove as VERIFIED_ACTIVE mint
-if grep -q 'expected VERIFIED_ACTIVE after prove' mcp-proxy/scripts/pilot-onboarding-smoke.sh; then
-  echo "✖  pilot-onboarding-smoke still expects VERIFIED_ACTIVE after prove" >&2
-  fail=1
+# Prove must not be documented as minting VERIFIED_ACTIVE (Core-local surfaces).
+# Enterprise pilot-onboarding-smoke lives in sqreen-enterprise; when present locally, check it.
+SMOKE="mcp-proxy/scripts/pilot-onboarding-smoke.sh"
+if [[ -f "$SMOKE" ]]; then
+  if grep -q 'expected VERIFIED_ACTIVE after prove' "$SMOKE"; then
+    echo "✖  pilot-onboarding-smoke still expects VERIFIED_ACTIVE after prove" >&2
+    fail=1
+  fi
+  if ! grep -q 'prove must not mint Aggregate VERIFIED_ACTIVE' "$SMOKE"; then
+    echo "✖  pilot-onboarding-smoke missing prove→not VERIFIED_ACTIVE assertion" >&2
+    fail=1
+  fi
+  if ! grep -q 'Aggregate:\[\[:space:\]\]+VERIFIED_ACTIVE' "$SMOKE"; then
+    echo "✖  pilot-onboarding-smoke should match Aggregate VERIFIED_ACTIVE precisely" >&2
+    fail=1
+  fi
 fi
-if ! grep -q 'prove must not mint Aggregate VERIFIED_ACTIVE' mcp-proxy/scripts/pilot-onboarding-smoke.sh; then
-  echo "✖  pilot-onboarding-smoke missing prove→not VERIFIED_ACTIVE assertion" >&2
-  fail=1
-fi
-if ! grep -q 'Aggregate:\[\[:space:\]\]+VERIFIED_ACTIVE' mcp-proxy/scripts/pilot-onboarding-smoke.sh; then
-  echo "✖  pilot-onboarding-smoke should match Aggregate VERIFIED_ACTIVE precisely" >&2
+if ! grep -E -q 'prove.*not.*mint|does not mint|does \*\*not\*\* mint' mcp-proxy/README.md; then
+  echo "✖  mcp-proxy/README.md should state prove does not mint VERIFIED_ACTIVE" >&2
   fail=1
 fi
 # Demo must not instruct prove → VERIFIED_ACTIVE as the traffic proof path
