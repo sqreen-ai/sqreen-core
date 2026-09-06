@@ -13,6 +13,7 @@ schema as mcp-proxy — on deny only (sync, ≤3s timeout).
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import re
 import sys
@@ -22,16 +23,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Keep in sync with mcp-proxy/mcp-policy.yaml global block_patterns.
-SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("\\.ssh/", re.compile(r"\.ssh/")),
-    ("~/.ssh/", re.compile(r"~/.ssh/")),
-    ("id_rsa", re.compile(r"id_rsa(\.|$)")),
-    ("id_ed25519", re.compile(r"id_ed25519(\.|$)")),
-    (".aws/credentials", re.compile(r"\.aws/credentials")),
-    (".env", re.compile(r"\.env(\.|$)")),
-    ("../.. traversal", re.compile(r"\.\./\.\./")),
-]
+# Canonical patterns from generate-security-baseline (Do not hand-edit).
+def _load_sensitive_patterns():
+    sibling = Path(__file__).resolve().with_name("generated_sensitive_patterns.py")
+    spec = importlib.util.spec_from_file_location("generated_sensitive_patterns", sibling)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"missing generated patterns at {sibling}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.SENSITIVE_PATTERNS
+
+
+SENSITIVE_PATTERNS = _load_sensitive_patterns()
 
 CONTROL_PLANE_URL_ENV = "MCP_CONTROL_PLANE_URL"
 DEVICE_TOKEN_ENV = "MCP_DEVICE_TOKEN"
@@ -106,9 +109,10 @@ def emit_hook_telemetry(payload: dict[str, Any], pattern_label: str) -> None:
         return
 
     event = str(payload.get("hook_event_name") or "cursor_hook")
+    # Never send the bearer as device_id — control plane assigns opaque identity
+    # from the authenticated X-Device-Token (device token != device_id).
     record = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "device_id": device_token,
         "tool_name": f"cursor_hook:{event}",
         "risk_score": HOOK_RISK_SCORE,
         "pattern_matched": pattern_label,

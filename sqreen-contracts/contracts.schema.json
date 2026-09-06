@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sqreen.ai/schemas/contracts.schema.json",
+  "title": "Sqreen Core and Enterprise Contracts",
+  "description": "Minimal public wire contracts between sqreen-core and sqreen-enterprise. Private algorithms, scoring weights, and SOC fields are out of scope.",
+  "$defs": {
+    "PolicyAction": {
+      "type": "string",
+      "enum": ["Allow", "Block", "Redact", "Confirm"]
+    },
+    "TrustLevel": {
+      "type": "string",
+      "enum": ["self_asserted", "derived", "authenticated", "bound"]
+    },
+    "ActionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "version"],
+      "properties": {
+        "digest": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "GlobalPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["redact_keys", "risk_threshold"],
+      "properties": {
+        "redact_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "risk_threshold": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "block_patterns": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "ToolPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "action", "block_patterns"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "action": { "$ref": "#/$defs/PolicyAction" },
+        "block_patterns": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "PolicyDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "global", "tools"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "global": { "$ref": "#/$defs/GlobalPolicy" },
+        "tools": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ToolPolicy" }
+        }
+      }
+    },
+    "PolicyEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "key_id",
+        "policy_id",
+        "organization_id",
+        "revision",
+        "issued_at",
+        "not_before",
+        "policy_digest",
+        "policy",
+        "signature"
+      ],
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "key_id": { "type": "string", "minLength": 1 },
+        "policy_id": { "type": "string", "minLength": 1 },
+        "organization_id": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "not_before": { "type": "string", "format": "date-time" },
+        "expires_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "previous_revision": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "policy_digest": { "type": "string", "minLength": 1 },
+        "policy": { "$ref": "#/$defs/PolicyDocument" },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ThreatIntelBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "indicators"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "indicators": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "scope": { "type": "string" },
+        "expires_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "signature": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "ExecutionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trust_level", "source"],
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "bound_id": { "type": "string" },
+        "org_id": { "type": "string" },
+        "trust_level": { "$ref": "#/$defs/TrustLevel" },
+        "source": { "type": "string", "minLength": 1 },
+        "agent_type": { "type": "string" }
+      }
+    },
+    "DeviceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_id", "org_id", "trust_level"],
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1 },
+        "org_id": { "type": "string", "minLength": 1 },
+        "trust_level": { "$ref": "#/$defs/TrustLevel" },
+        "token_prefix": { "type": "string" },
+        "issued_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "ApprovalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_binding",
+        "device_id",
+        "organization_id",
+        "tool_name",
+        "requested_at",
+        "expires_at"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "action_binding": { "$ref": "#/$defs/ActionBinding" },
+        "device_id": { "type": "string", "minLength": 1 },
+        "organization_id": { "type": "string", "minLength": 1 },
+        "tool_name": { "type": "string", "minLength": 1 },
+        "resource_summary": { "type": "string" },
+        "reason_codes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "requested_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "nonce": { "type": "string" }
+      }
+    },
+    "ApprovalDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_binding",
+        "decision",
+        "organization_id",
+        "device_id",
+        "decided_at"
+      ],
+      "properties": {
+        "action_binding": { "$ref": "#/$defs/ActionBinding" },
+        "decision": {
+          "type": "string",
+          "enum": ["approved", "denied"]
+        },
+        "organization_id": { "type": "string", "minLength": 1 },
+        "device_id": { "type": "string", "minLength": 1 },
+        "approver_id": { "type": "string" },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "expires_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "single_use_nonce": { "type": "string" },
+        "signature": { "type": "string" }
+      }
+    },
+    "TelemetryEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "device_id", "tool_name", "decision"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "device_id": { "type": "string", "minLength": 1 },
+        "tool_name": { "type": "string", "minLength": 1 },
+        "decision": { "type": "string" },
+        "reason_codes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "policy_id": { "type": "string" },
+        "policy_revision": { "type": "integer", "minimum": 0 },
+        "session_id": { "type": "string" },
+        "trace_id": { "type": "string" }
+      }
+    }
+  }
+}

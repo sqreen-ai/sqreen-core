@@ -35,13 +35,37 @@ use crate::gateway::{AgentExecutionGateway, Decision, EvaluationOutcome};
 
 use super::{AdapterError, NormalizationContext, ToolCallAdapter};
 
-/// Whether a catalog entry ships today or is reserved for a future adapter.
+/// Public support label for an adapter or reserved runtime.
+///
+/// These labels are the source of truth for marketing/docs claim drift checks.
+/// Adapter code may exist without being production-supported (see [`Experimental`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeSupport {
-    /// Decode (+ typically enforce) is implemented in-tree.
-    Shipped,
+    /// Production-supported interception path.
+    ProductionSupported,
+    /// Pilot-supported path (may have documented limits).
+    PilotSupported,
+    /// Adapter/foundation only — do not advertise as a production/pilot HTTP path.
+    Experimental,
     /// Reserved id / runtime slug; no adapter yet — use [`super::GenericAdapter`] meanwhile.
     Planned,
+}
+
+impl RuntimeSupport {
+    /// Operator / docs label (stable string for greps and CLI).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProductionSupported => "PRODUCTION_SUPPORTED",
+            Self::PilotSupported => "PILOT_SUPPORTED",
+            Self::Experimental => "EXPERIMENTAL",
+            Self::Planned => "PLANNED",
+        }
+    }
+
+    /// Whether an in-tree adapter module exists (anything except [`Planned`]).
+    pub fn has_adapter(self) -> bool {
+        !matches!(self, Self::Planned)
+    }
 }
 
 /// One row in the provider/runtime catalog.
@@ -56,43 +80,85 @@ pub struct RuntimeDescriptor {
     pub summary: &'static str,
 }
 
+/// Public product integration matrix (claim surface — not every adapter id).
+///
+/// Locked by unit tests so marketing/docs cannot silently claim beyond production wiring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicIntegrationClaim {
+    /// Stable claim id for tests/docs.
+    pub id: &'static str,
+    /// Human label matching the public matrix.
+    pub label: &'static str,
+    /// Short scope note (limits / wiring).
+    pub notes: &'static str,
+}
+
+/// Authoritative public support matrix for Sqreen Core integrations.
+pub const PUBLIC_INTEGRATION_MATRIX: &[PublicIntegrationClaim] = &[
+    PublicIntegrationClaim {
+        id: "generic_mcp_stdio",
+        label: "PRODUCTION_SUPPORTED",
+        notes: "mcp-proxy -- run … — pre-tool-call MCP stdio wrap",
+    },
+    PublicIntegrationClaim {
+        id: "cursor_mcp_core_wrap",
+        label: "PILOT_SUPPORTED",
+        notes: "Cursor mcp.json Core wrap — same MCP stdio engine as generic wrap",
+    },
+    PublicIntegrationClaim {
+        id: "openai_compatible_http",
+        label: "PILOT_SUPPORTED_LIMITED",
+        notes: "serve: OpenAI-compatible Chat Completions; non-stream response tool_calls only",
+    },
+    PublicIntegrationClaim {
+        id: "anthropic_http_messages",
+        label: "EXPERIMENTAL",
+        notes: "AnthropicAdapter foundation; /v1/messages via serve is not an enforced tool-call path",
+    },
+    PublicIntegrationClaim {
+        id: "cursor_hooks",
+        label: "EXPERIMENTAL_SECONDARY",
+        notes: "IDE hooks — not Core wrap verification / VERIFIED_ACTIVE",
+    },
+];
+
 /// Known and planned runtimes. New adapters should add a row here when they land (or when
 /// reserved), without touching gateway/policy/risk.
 pub const RUNTIME_CATALOG: &[RuntimeDescriptor] = &[
     RuntimeDescriptor {
         id: "mcp",
         runtime_slug: "mcp_stdio",
-        support: RuntimeSupport::Shipped,
-        summary: "MCP tools/call over stdio or streamable HTTP",
+        support: RuntimeSupport::ProductionSupported,
+        summary: "MCP tools/call stdio wrap (generic). Cursor Core wrap uses this path (pilot Day-1).",
     },
     RuntimeDescriptor {
         id: "openai",
         runtime_slug: "openai_http",
-        support: RuntimeSupport::Shipped,
-        summary: "OpenAI Chat Completions / Responses tool_calls",
+        support: RuntimeSupport::PilotSupported,
+        summary: "OpenAI-compatible Chat Completions; non-stream response tool_calls via serve (limited)",
     },
     RuntimeDescriptor {
         id: "anthropic",
         runtime_slug: "anthropic_http",
-        support: RuntimeSupport::Shipped,
-        summary: "Anthropic Messages tool_use content blocks",
+        support: RuntimeSupport::Experimental,
+        summary: "AnthropicAdapter foundation — Messages HTTP via serve not wired",
     },
     RuntimeDescriptor {
         id: "cursor",
         runtime_slug: "cursor_hook",
-        support: RuntimeSupport::Shipped,
-        summary: "Cursor IDE before*/after* hooks",
+        support: RuntimeSupport::Experimental,
+        summary: "Cursor IDE hooks (secondary; not Core wrap verification)",
     },
     RuntimeDescriptor {
         id: "claude_code",
         runtime_slug: "claude_code_hook",
-        support: RuntimeSupport::Shipped,
-        summary: "Claude Code PreToolUse / PostToolUse hooks",
+        support: RuntimeSupport::Experimental,
+        summary: "Claude Code PreToolUse / PostToolUse hooks (secondary)",
     },
     RuntimeDescriptor {
         id: "generic",
         runtime_slug: "custom",
-        support: RuntimeSupport::Shipped,
+        support: RuntimeSupport::Experimental,
         summary: "Nameless JSON tool calls and direct shell/fs/http/db/browser intercepts",
     },
     // --- Planned (do not implement yet) ---
@@ -145,7 +211,6 @@ pub const RUNTIME_CATALOG: &[RuntimeDescriptor] = &[
         summary: "Database proxy / query interception",
     },
 ];
-
 /// Looks up a catalog row by adapter id.
 pub fn runtime_descriptor(id: &str) -> Option<&'static RuntimeDescriptor> {
     RUNTIME_CATALOG.iter().find(|row| row.id == id)
@@ -301,11 +366,11 @@ where
     })
 }
 
-/// Helper for docs/tests: shipped adapter ids.
+/// Helper for docs/tests: adapter ids with an in-tree implementation (not planned-only).
 pub fn shipped_adapter_ids() -> impl Iterator<Item = &'static str> {
     RUNTIME_CATALOG
         .iter()
-        .filter(|row| row.support == RuntimeSupport::Shipped)
+        .filter(|row| row.support.has_adapter())
         .map(|row| row.id)
 }
 
@@ -317,6 +382,11 @@ pub fn planned_adapter_ids() -> impl Iterator<Item = &'static str> {
         .map(|row| row.id)
 }
 
+/// Looks up a public integration claim by id.
+pub fn public_integration_claim(id: &str) -> Option<&'static PublicIntegrationClaim> {
+    PUBLIC_INTEGRATION_MATRIX.iter().find(|row| row.id == id)
+}
+
 /// Convenience: runtime constant used when recording catalog consistency in tests.
 pub fn runtime_matches_slug(runtime: &Runtime, slug: &str) -> bool {
     runtime.as_str() == slug || (slug == "custom" && !runtime.is_known())
@@ -326,7 +396,7 @@ pub fn runtime_matches_slug(runtime: &Runtime, slug: &str) -> bool {
 mod tests {
     use super::*;
     use crate::adapters::{
-        McpAdapter, McpToolsCall, OpenAiAdapter, OpenAiFunctionCall, RuntimeAdapter,
+        McpAdapter, McpToolsCall, OpenAiAdapter, OpenAiFunctionCall,
     };
     use crate::gateway::{AllowAllApprovalEngine, DenyAllApprovalEngine, GatewayBuilder};
     use crate::policy::PolicyEngine;
@@ -348,13 +418,57 @@ tools:
 "#;
 
     #[test]
-    fn catalog_lists_shipped_and_planned_runtimes() {
+    fn catalog_lists_support_levels_and_planned_runtimes() {
         assert!(shipped_adapter_ids().any(|id| id == "mcp"));
         assert!(shipped_adapter_ids().any(|id| id == "openai"));
+        assert!(shipped_adapter_ids().any(|id| id == "anthropic"));
         assert!(shipped_adapter_ids().any(|id| id == "cursor"));
+        assert_eq!(
+            runtime_descriptor("mcp").unwrap().support,
+            RuntimeSupport::ProductionSupported
+        );
+        assert_eq!(
+            runtime_descriptor("openai").unwrap().support,
+            RuntimeSupport::PilotSupported
+        );
+        assert_eq!(
+            runtime_descriptor("anthropic").unwrap().support,
+            RuntimeSupport::Experimental
+        );
+        assert_eq!(
+            runtime_descriptor("cursor").unwrap().support,
+            RuntimeSupport::Experimental
+        );
         assert!(planned_adapter_ids().any(|id| id == "gemini"));
         assert!(planned_adapter_ids().any(|id| id == "langchain"));
         assert!(runtime_descriptor("crewai").unwrap().support == RuntimeSupport::Planned);
+        // OpenAI catalog must not claim Responses API / streaming as shipped scope.
+        assert!(
+            !runtime_descriptor("openai")
+                .unwrap()
+                .summary
+                .to_ascii_lowercase()
+                .contains("responses")
+        );
+    }
+
+    #[test]
+    fn public_integration_matrix_matches_audit_labels() {
+        let by_id = |id: &str| public_integration_claim(id).expect(id);
+        assert_eq!(by_id("generic_mcp_stdio").label, "PRODUCTION_SUPPORTED");
+        assert_eq!(by_id("cursor_mcp_core_wrap").label, "PILOT_SUPPORTED");
+        assert_eq!(
+            by_id("openai_compatible_http").label,
+            "PILOT_SUPPORTED_LIMITED"
+        );
+        assert_eq!(by_id("anthropic_http_messages").label, "EXPERIMENTAL");
+        assert_eq!(by_id("cursor_hooks").label, "EXPERIMENTAL_SECONDARY");
+        assert!(by_id("anthropic_http_messages")
+            .notes
+            .contains("not an enforced"));
+        assert!(by_id("openai_compatible_http")
+            .notes
+            .contains("non-stream"));
     }
 
     #[tokio::test]

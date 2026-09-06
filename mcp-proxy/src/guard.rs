@@ -194,8 +194,43 @@ pub async fn evaluate_action(ctx: &GuardContext, action: &AgentAction) -> Result
 }
 
 /// Evaluates a normalized action and returns the full outcome.
+///
+/// Best-effort records a local activity marker so `mcp-proxy status` can distinguish
+/// **configured** wrap from **verified** protected traffic. Recording never affects the
+/// decision.
+///
+/// Call this only from real enforcement entrypoints (stdio wrap, HTTP `serve`, etc.).
+/// In-process self-checks such as `mcp-proxy prove` must use
+/// [`evaluate_outcome_self_check`] so they cannot mint `VERIFIED_ACTIVE`.
 pub async fn evaluate_outcome(ctx: &GuardContext, action: &AgentAction) -> EvaluationOutcome {
-    ctx.gateway().evaluate(action).await
+    evaluate_outcome_inner(ctx, action, true).await
+}
+
+/// Gateway/policy self-check — same decision path, **no** runtime-coverage activity marker.
+///
+/// Used by `mcp-proxy prove`. A local evaluation alone must never prove that Cursor/MCP/HTTP
+/// agent traffic is protected.
+pub async fn evaluate_outcome_self_check(
+    ctx: &GuardContext,
+    action: &AgentAction,
+) -> EvaluationOutcome {
+    evaluate_outcome_inner(ctx, action, false).await
+}
+
+async fn evaluate_outcome_inner(
+    ctx: &GuardContext,
+    action: &AgentAction,
+    record_activity: bool,
+) -> EvaluationOutcome {
+    let outcome = ctx.gateway().evaluate(action).await;
+    if record_activity {
+        crate::pilot::activity::record_protected_evaluation(
+            action.runtime().as_str(),
+            action.tool_name(),
+            outcome.decision.as_str(),
+        );
+    }
+    outcome
 }
 
 #[cfg(test)]

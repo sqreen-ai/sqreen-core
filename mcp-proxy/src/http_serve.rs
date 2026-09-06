@@ -4,7 +4,9 @@
 //! `tool_calls` through [`crate::guard`] before returning them to the client.
 //!
 //! MVP: non-streaming chat completions only. Requests with `"stream": true` are
-//! rejected with HTTP 400.
+//! rejected with HTTP 400. This is **PILOT_SUPPORTED — LIMITED** response-side
+//! interception — not equivalent to MCP pre-tool-call enforcement. Anthropic
+//! Messages `/v1/messages` is not handled here.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;

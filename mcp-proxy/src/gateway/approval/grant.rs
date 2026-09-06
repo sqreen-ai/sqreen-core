@@ -133,7 +133,7 @@ impl ActionBinding {
         hasher.update(environment.as_bytes());
 
         Self {
-            fingerprint: format!("{:x}", hasher.finalize()),
+            fingerprint: hex::encode(hasher.finalize()),
             args_digest,
             tool_name,
             agent_id,
@@ -796,9 +796,7 @@ pub fn session_approval_safe(action: &AgentAction, level: RiskLevel) -> bool {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(test)]

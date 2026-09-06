@@ -11,8 +11,8 @@ if [[ ! -f "$CANONICAL" ]]; then
   exit 1
 fi
 if [[ ! -f "$PUBLIC" ]]; then
-  echo "missing public installer: $PUBLIC" >&2
-  exit 1
+  echo "installer sync skipped: no public site mirror at $PUBLIC"
+  exit 0
 fi
 
 if ! cmp -s "$CANONICAL" "$PUBLIC"; then

@@ -1,36 +1,44 @@
 # Sqreen Core (`mcp-proxy`)
 
-Local runtime enforcement for intercepted AI agent tool calls — MCP, OpenAI-compatible HTTP, and IDE Integrations.
+Local runtime enforcement for intercepted AI agent tool calls — **MCP stdio wrap** (primary), **OpenAI-compatible HTTP** (pilot limited), and optional IDE hooks (experimental / secondary).
 
 Product overview (what / why / privacy / vs guardrails): **[../README.md](../README.md)**.  
-Pilot path: **[../docs/QUICKSTART.md](../docs/QUICKSTART.md)**.
+Pilot path: **[../docs/QUICKSTART.md](../docs/QUICKSTART.md)**.  
+Support matrix: **[../docs/PROVIDER_ADAPTERS.md](../docs/PROVIDER_ADAPTERS.md)**.
 
 Binary name: **`mcp-proxy`**. Optional alias binary: **`sqreen`** (same CLI).
 
-## 5-minute first run
+## 5-minute first run (Cursor + MCP)
 
 ```bash
-# 1. Install
+# 1. Install (auto-wraps Cursor MCP when a supported mcp.json exists)
 curl -fsSL https://sqreen.ai/install.sh | bash
-
-# 2. Load config (sets MCP_POLICY_PATH)
 source ~/.config/mcp-proxy/env
+# Read post-install: Cursor integration CONFIGURED vs NOT CONFIGURED
 
-# 3. See the aha moment — allow, block, confirm/approval
+# 2. Policy demo (not traffic proof)
 mcp-proxy demo
 
-# 4. Health
-mcp-proxy status
-mcp-proxy doctor
+# 3. Only if NOT CONFIGURED (also repair / re-run):
+# mcp-proxy integrate cursor
+
+# 4. Restart Cursor / reload MCP, then one real tools/call in Cursor
+mcp-proxy integrations && mcp-proxy status   # VERIFIED_ACTIVE after real wrap traffic
 ```
 
-The demo uses **synthetic paths only** (`/tmp/sqreen-demo-ok.txt`, `/tmp/sqreen-demo.ssh/id_rsa`, benign `execute_bash`). No real secrets or destructive commands.
+`demo` uses **synthetic paths only**. It does **not** mean Cursor is protected.
+`CONFIGURED` wrap ≠ `VERIFIED_ACTIVE` — real agent traffic must be observed first.
+`prove` is an optional gateway self-check and does **not** mint `VERIFIED_ACTIVE`.
 
 ## Wrap MCP (Cursor / Claude Desktop)
 
-The installer patches known IDE `mcp.json` files to run servers through Sqreen and injects `MCP_POLICY_PATH`. Restart the IDE after install.
+**Day-1 primary:** installer auto-wrap when possible. Use integrate when install did not configure Cursor, or to repair:
 
-Manual wrap:
+```bash
+mcp-proxy integrate cursor
+```
+
+Then restart Cursor / reload MCP. Manual shape:
 
 ```json
 {
@@ -46,9 +54,11 @@ Manual wrap:
 }
 ```
 
-Check wraps: `mcp-proxy integrations`.
+Check wraps: `mcp-proxy integrations`. Verify active traffic: `mcp-proxy status` (after a real tools/call).
 
-## OpenAI-compatible agents
+Generic MCP stdio (`mcp-proxy -- run …`) is **PRODUCTION_SUPPORTED**. Cursor Core wrap is the same engine, labeled **PILOT_SUPPORTED** for Day-1. Cursor IDE hooks are **EXPERIMENTAL / SECONDARY** and do not mint `VERIFIED_ACTIVE`.
+
+## OpenAI-compatible agents (pilot limited)
 
 ```bash
 source ~/.config/mcp-proxy/env
@@ -56,20 +66,18 @@ mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.openai.com
 export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 ```
 
-## Anthropic Messages API
+**PILOT_SUPPORTED — LIMITED:** non-streaming Chat Completions only. Policy runs on **response** `tool_calls` before the client executes them — not equivalent to MCP pre-tool-call blocking. Streaming and the Responses API are unsupported.
 
-```bash
-mcp-proxy serve --listen 127.0.0.1:8787 --upstream https://api.anthropic.com
-# Point your Anthropic SDK base URL at http://127.0.0.1:8787
-```
+## Anthropic Messages (experimental)
 
+`AnthropicAdapter` exists for tests and a future Messages proxy. Pointing an Anthropic SDK at `mcp-proxy serve` does **not** enforce Messages `tool_use` today — do not advertise this as a supported HTTP path.
 ## First policy, block, and approval
 
 | Experience | How |
 |------------|-----|
 | **First policy** | `~/.config/mcp-proxy/mcp-policy.yaml` (seeded by installer) |
 | **First block** | `mcp-proxy demo` or agent `read_file` on a `.ssh`-shaped path |
-| **First approval** | Tool `execute_bash` is `Confirm` — local TTY or Cloud SOC when `SQREEN_APPROVAL_MODE=remote\|auto` |
+| **First approval** | Tool `execute_bash` is `Confirm` — local TTY / stdin by default |
 
 Edit policy, then re-run `mcp-proxy demo` or restart the IDE MCP server. Do not disable the security baseline to clear blocks.
 
@@ -77,11 +85,12 @@ Edit policy, then re-run `mcp-proxy demo` or restart the IDE MCP server. Do not 
 
 ```text
 mcp-proxy demo
+mcp-proxy integrate cursor
+mcp-proxy prove
 mcp-proxy status
 mcp-proxy doctor
 mcp-proxy integrations
 mcp-proxy support-bundle [--out DIR]
-mcp-proxy enroll --control-plane URL --device-token TOKEN [--device-id ID] [--org-id ORG]
 mcp-proxy --help
 mcp-proxy --version
 mcp-proxy -- run <mcp-server> [args...]
@@ -90,8 +99,8 @@ mcp-proxy serve [--listen ADDR] [--upstream URL]
 sqreen …                    # same commands (alias binary)
 ```
 
-`enroll` writes `~/.config/mcp-proxy/env` (mode `0600`) and never echoes the device token.  
 `support-bundle` writes a redacted diagnostics folder — inspect before sharing.
+Enterprise management commands (when present) are documented separately for Enterprise builds.
 
 ## Uninstall / rollback
 
@@ -105,6 +114,8 @@ Restore IDE configs from the newest `mcp.json.bak.*` beside the live file.
 ## Verify (developers)
 
 ```bash
+cargo test --lib adapters::framework -- --nocapture
+./scripts/check-integration-claims.sh
 cargo test --lib pilot -- --nocapture
 cargo test --lib demo -- --nocapture
 ./scripts/pilot-onboarding-smoke.sh

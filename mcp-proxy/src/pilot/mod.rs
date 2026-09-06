@@ -2,16 +2,31 @@
 //!
 //! Commands: `status`, `doctor`, `integrations`, `support-bundle`, `enroll`, `update`.
 
+pub mod activity;
+pub mod approval_mode;
 pub mod config;
-pub mod doctor;
-pub mod enroll;
+pub mod day1;
+pub mod integrate;
 pub mod integrations;
+pub mod prove;
 pub mod status;
 pub mod support_bundle;
 pub mod update;
 
-pub use enroll::{run_enroll, EnrollArgs};
+#[cfg(feature = "enterprise")]
+pub use crate::enterprise::pilot::{run_enroll, EnrollArgs};
+
+#[cfg(not(feature = "enterprise"))]
+mod doctor_local;
+#[cfg(not(feature = "enterprise"))]
+mod enroll_stub;
+
+#[cfg(not(feature = "enterprise"))]
+pub use enroll_stub::{run_enroll, EnrollArgs};
+
+pub use integrate::run_integrate;
 pub use integrations::run_integrations;
+pub use prove::run_prove;
 pub use status::run_status;
 pub use support_bundle::run_support_bundle;
 
@@ -24,6 +39,10 @@ pub enum PilotCommand {
     Status,
     Doctor,
     Integrations,
+    Integrate {
+        target: String,
+    },
+    Prove,
     SupportBundle {
         out: Option<PathBuf>,
     },
@@ -32,6 +51,10 @@ pub enum PilotCommand {
     Update {
         check_only: bool,
     },
+    ApprovalMode {
+        mode: String,
+    },
+    TestRemoteApproval,
 }
 
 /// Dispatches a pilot command.
@@ -39,20 +62,39 @@ pub async fn run_pilot(cmd: PilotCommand) -> Result<()> {
     match cmd {
         PilotCommand::Status => run_status(),
         PilotCommand::Doctor => {
-            let ok = doctor::run_doctor().await?;
-            if !ok {
-                // Non-zero exit is handled by main via Err — keep stdout complete.
-                anyhow::bail!("doctor reported FAIL checks");
+            #[cfg(feature = "enterprise")]
+            {
+                let ok = crate::enterprise::pilot::doctor::run_doctor().await?;
+                if !ok {
+                    anyhow::bail!("doctor reported FAIL checks");
+                }
+                Ok(())
             }
-            Ok(())
+            #[cfg(not(feature = "enterprise"))]
+            {
+                doctor_local::run_doctor()
+            }
         }
         PilotCommand::Integrations => run_integrations(),
+        PilotCommand::Integrate { target } => run_integrate(&target),
+        PilotCommand::Prove => run_prove().await,
         PilotCommand::SupportBundle { out } => {
             run_support_bundle(out).await?;
             Ok(())
         }
         PilotCommand::Enroll(args) => run_enroll(args),
         PilotCommand::Update { check_only } => update::run_update(check_only).await,
+        PilotCommand::ApprovalMode { mode } => approval_mode::run_approval_mode(&mode),
+        PilotCommand::TestRemoteApproval => {
+            #[cfg(feature = "enterprise")]
+            {
+                crate::enterprise::pilot::test_remote_approval::run_test_remote_approval().await
+            }
+            #[cfg(not(feature = "enterprise"))]
+            {
+                anyhow::bail!("test-remote-approval requires the enterprise build")
+            }
+        }
     }
 }
 
@@ -68,6 +110,21 @@ pub fn parse_pilot_command(argv: &[String]) -> Result<Option<PilotCommand>> {
         "status" => Ok(Some(PilotCommand::Status)),
         "doctor" => Ok(Some(PilotCommand::Doctor)),
         "integrations" => Ok(Some(PilotCommand::Integrations)),
+        "integrate" => {
+            let target = args
+                .get(1)
+                .copied()
+                .unwrap_or("cursor")
+                .to_string();
+            if args.len() > 2 {
+                anyhow::bail!(
+                    "usage: mcp-proxy integrate [cursor]\n\
+                     Primary Day-1 path: Cursor + MCP"
+                );
+            }
+            Ok(Some(PilotCommand::Integrate { target }))
+        }
+        "prove" => Ok(Some(PilotCommand::Prove)),
         "support-bundle" | "support_bundle" => {
             let mut out = None;
             let mut rest = args.iter().skip(1);
@@ -84,7 +141,66 @@ pub fn parse_pilot_command(argv: &[String]) -> Result<Option<PilotCommand>> {
             }
             Ok(Some(PilotCommand::SupportBundle { out }))
         }
-        "enroll" => Ok(Some(PilotCommand::Enroll(parse_enroll_args(&args[1..])?))),
+        "enroll" => {
+            #[cfg(feature = "enterprise")]
+            {
+                Ok(Some(PilotCommand::Enroll(parse_enroll_args(&args[1..])?)))
+            }
+            #[cfg(not(feature = "enterprise"))]
+            {
+                let _ = &args;
+                anyhow::bail!(
+                    "unknown command `enroll`\n\
+                     Enterprise management is available separately.\n\
+                     Try: mcp-proxy --help"
+                )
+            }
+        }
+        "approval-mode" | "approval_mode" => {
+            #[cfg(feature = "enterprise")]
+            {
+                let mode = args
+                    .get(1)
+                    .copied()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "usage: mcp-proxy approval-mode <local|remote|auto>"
+                        )
+                    })?
+                    .to_string();
+                if args.len() > 2 {
+                    anyhow::bail!("usage: mcp-proxy approval-mode <local|remote|auto>");
+                }
+                Ok(Some(PilotCommand::ApprovalMode { mode }))
+            }
+            #[cfg(not(feature = "enterprise"))]
+            {
+                let _ = &args;
+                anyhow::bail!(
+                    "unknown command `approval-mode`\n\
+                     Standalone Core uses local approval by default.\n\
+                     Try: mcp-proxy --help"
+                )
+            }
+        }
+        "test-remote-approval" | "test_remote_approval" => {
+            #[cfg(feature = "enterprise")]
+            {
+                if args.len() > 1 {
+                    anyhow::bail!("usage: mcp-proxy test-remote-approval");
+                }
+                Ok(Some(PilotCommand::TestRemoteApproval))
+            }
+            #[cfg(not(feature = "enterprise"))]
+            {
+                let _ = &args;
+                anyhow::bail!(
+                    "unknown command `test-remote-approval`\n\
+                     Enterprise management is available separately.\n\
+                     Try: mcp-proxy --help"
+                )
+            }
+        }
         "update" => {
             let check_only = args.iter().any(|a| *a == "--check" || *a == "-c");
             for arg in args.iter().skip(1) {
@@ -103,6 +219,7 @@ pub fn parse_pilot_command(argv: &[String]) -> Result<Option<PilotCommand>> {
     }
 }
 
+#[cfg(feature = "enterprise")]
 fn parse_enroll_args(args: &[&str]) -> Result<EnrollArgs> {
     let mut control_plane = None;
     let mut device_token = None;
@@ -194,16 +311,67 @@ mod tests {
             "tok".into(),
             "--device-id".into(),
             "d1".into(),
+        ]);
+        #[cfg(feature = "enterprise")]
+        {
+            match enroll.unwrap().unwrap() {
+                PilotCommand::Enroll(args) => {
+                    assert_eq!(args.control_plane, "https://cp.example");
+                    assert_eq!(args.device_token, "tok");
+                    assert_eq!(args.device_id.as_deref(), Some("d1"));
+                }
+                _ => panic!("expected enroll"),
+            }
+        }
+        #[cfg(not(feature = "enterprise"))]
+        {
+            assert!(enroll.is_err());
+        }
+    }
+
+    #[test]
+    fn parses_integrate_and_prove() {
+        let integrate = parse_pilot_command(&[
+            "mcp-proxy".into(),
+            "integrate".into(),
+            "cursor".into(),
         ])
         .unwrap()
         .unwrap();
-        match enroll {
-            PilotCommand::Enroll(args) => {
-                assert_eq!(args.control_plane, "https://cp.example");
-                assert_eq!(args.device_token, "tok");
-                assert_eq!(args.device_id.as_deref(), Some("d1"));
-            }
-            _ => panic!("expected enroll"),
+        assert!(matches!(
+            integrate,
+            PilotCommand::Integrate { target } if target == "cursor"
+        ));
+
+        let prove = parse_pilot_command(&["mcp-proxy".into(), "prove".into()])
+            .unwrap()
+            .unwrap();
+        assert!(matches!(prove, PilotCommand::Prove));
+
+        let mode = parse_pilot_command(&[
+            "mcp-proxy".into(),
+            "approval-mode".into(),
+            "remote".into(),
+        ]);
+        let test = parse_pilot_command(&[
+            "mcp-proxy".into(),
+            "test-remote-approval".into(),
+        ]);
+        #[cfg(feature = "enterprise")]
+        {
+            assert!(matches!(
+                mode.unwrap().unwrap(),
+                PilotCommand::ApprovalMode { mode } if mode == "remote"
+            ));
+            assert!(matches!(
+                test.unwrap().unwrap(),
+                PilotCommand::TestRemoteApproval
+            ));
+        }
+        #[cfg(not(feature = "enterprise"))]
+        {
+            assert!(mode.is_err());
+            assert!(test.is_err());
         }
     }
 

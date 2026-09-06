@@ -44,6 +44,7 @@ pub mod http_serve;
 pub mod identity;
 pub mod peeker;
 pub mod pilot;
+pub mod local_env;
 pub mod policy;
 pub mod policy_store;
 pub mod risk;
@@ -53,6 +54,9 @@ pub mod taxonomy;
 pub mod telemetry;
 pub mod threat_intel;
 pub mod wasm_engine;
+
+#[cfg(feature = "enterprise")]
+pub mod enterprise;
 
 pub use action::{
     ActionId, ActionValidationError, AgentAction, AgentType, Arguments, DataClassification,

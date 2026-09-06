@@ -52,9 +52,10 @@ pub use anthropic::{AnthropicAdapter, AnthropicEffect, AnthropicToolUse};
 pub use claude_code::{ClaudeCodeAdapter, ClaudeCodeEffect, ClaudeCodeHookEvent};
 pub use cursor::{CursorAdapter, CursorEffect, CursorHookEvent};
 pub use framework::{
-    planned_adapter_ids, process_with_adapter, process_with_adapter_owned, runtime_descriptor,
-    shipped_adapter_ids, AdapterExecutionRecord, AdapterProcessResult, RuntimeAdapter,
-    RuntimeDescriptor, RuntimeSupport, RUNTIME_CATALOG,
+    planned_adapter_ids, process_with_adapter, process_with_adapter_owned, public_integration_claim,
+    runtime_descriptor, shipped_adapter_ids, AdapterExecutionRecord, AdapterProcessResult,
+    PublicIntegrationClaim, RuntimeAdapter, RuntimeDescriptor, RuntimeSupport,
+    PUBLIC_INTEGRATION_MATRIX, RUNTIME_CATALOG,
 };
 pub use generic::{GenericAdapter, GenericEffect, GenericToolCall};
 pub use mcp::{McpAdapter, McpDenyStyle, McpEffect, McpToolsCall, McpTransport};

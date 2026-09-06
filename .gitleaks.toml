@@ -1,14 +1,23 @@
 title = "Sqreen gitleaks config"
 
 [allowlist]
-description = "Intentional local dev fixtures and e2e scripts — not production secrets"
+description = "Intentional fixtures, docs, and public verification material — not production secrets"
 paths = [
   '''mcp-proxy/scripts/''',
+  '''mcp-proxy/tests/''',
+  '''mcp-proxy/keys/''',
+  '''frontend/public/releases/.*\.pub$''',
   '''mcp-control-plane/README.md''',
+  '''mcp-dashboard/\.env\.example''',
+  '''mcp-proxy/\.env\.example''',
   '''SECURITY.md''',
+  '''docs/CREDENTIALS.md''',
+  '''CONTRIBUTING.md''',
 ]
 regexes = [
   '''dev-admin-token-change-me''',
   '''dev-device-token-change-me''',
   '''bootstrap-env-token''',
+  '''sqreen_admin_REPLACE_ME''',
+  '''sqreen_device_REPLACE_ME''',
 ]

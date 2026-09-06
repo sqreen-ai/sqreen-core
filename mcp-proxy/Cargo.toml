@@ -23,6 +23,12 @@ path = "src/main.rs"
 name = "generate-security-baseline"
 path = "src/bin/generate-security-baseline.rs"
 
+[features]
+default = []
+# Cloud client, remote approvals, advanced behavior detectors, enrollment CLI.
+# Public sqreen-core builds disable this feature; monorepo/enterprise keep it on.
+enterprise = []
+
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
@@ -39,7 +45,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 serde_yaml = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 tokio = { version = "1.43", features = ["full"] }
 wasmtime = "29"
 

@@ -26,7 +26,6 @@ use mcp_proxy::adapters::{
 };
 use mcp_proxy::behavior::SessionTracker;
 use mcp_proxy::cloud_client::CloudClient;
-use mcp_proxy::demo::run_first_block_demo;
 use mcp_proxy::gateway::{sanitize_detail, sanitize_error, FailurePolicy, Subsystem};
 use mcp_proxy::guard::{evaluate_outcome, GuardContext};
 use mcp_proxy::http_serve::{run_agent_firewall_with_stores, sanitize_server_frame, ServeConfig};
@@ -58,11 +57,12 @@ Sqreen Core (mcp-proxy) {VERSION} — security layer for AI agent tool calls
 
 Usage:
   mcp-proxy demo
+  mcp-proxy integrate cursor
+  mcp-proxy prove
   mcp-proxy status
   mcp-proxy doctor
   mcp-proxy integrations
   mcp-proxy support-bundle [--out DIR]
-  mcp-proxy enroll --control-plane URL --device-token TOKEN [--device-id ID]
   mcp-proxy update --check
   mcp-proxy -- run <command> [args...]
   mcp-proxy serve [--listen ADDR] [--upstream URL]
@@ -72,20 +72,25 @@ Usage:
   (alias) sqreen …   same commands as mcp-proxy
 
 Commands:
-  demo            Safe first-run demo: allow, block, confirm/approval, explain
-  status          Protection ACTIVE/INACTIVE, policy, posture, cloud, integrations
-  doctor          PASS/WARN/FAIL health checks with remediation
-  integrations    Detect Cursor/Claude wrap, control plane, OPENAI_BASE_URL
+  demo            Safe first-run demo: allow, block, confirm/approval (policy only — not traffic proof)
+  integrate       Wrap Cursor MCP when not already configured (repair / manual Day-1)
+  prove           Gateway self-check ALLOW + DENY (does not mint VERIFIED_ACTIVE)
+  status          Policy / runtime coverage (local-first)
+  doctor          PASS/WARN/FAIL local health checks with remediation
+  integrations    Detect Cursor/Claude wrap and local HTTP-agent config
   support-bundle  Write a redacted diagnostics folder (inspect before sharing)
-  enroll          Write control-plane URL + device token to ~/.config/mcp-proxy/env
   update          Compare local version to signed release channel (--check; no auto-install)
-  serve           HTTP proxy for OpenAI-compatible (and Anthropic-shaped) agent tool traffic
+  serve           HTTP proxy for OpenAI-compatible Chat Completions (pilot limited; non-stream response tool_calls)
   -- run          Wrap an MCP stdio server (used by Cursor / Claude Desktop)
 
 Examples:
   source ~/.config/mcp-proxy/env
   mcp-proxy demo
-  mcp-proxy status && mcp-proxy doctor
+  # integrate only if wrap is NOT CONFIGURED (installer may already wrap)
+  mcp-proxy integrate cursor
+  # restart Cursor / reload MCP, then one real tools/call
+  mcp-proxy integrations
+  mcp-proxy status
 
   mcp-proxy -- run npx -y @modelcontextprotocol/server-filesystem .
 
@@ -96,12 +101,23 @@ Policy:
   MCP_POLICY_PATH   Override policy file (default: ./mcp-policy.yaml or ~/.config/mcp-proxy/mcp-policy.yaml)
 
 Docs:
-  docs/QUICKSTART.md · docs/PRIVACY.md · docs/DESIGN_PARTNER.md
+  docs/QUICKSTART.md · docs/PRIVACY.md · docs/FAILURE_MODES.md
 
 Uninstall:
   See README — restore IDE mcp.json from .bak.* and remove ~/.local/bin/mcp-proxy
 "
     );
+    #[cfg(feature = "enterprise")]
+    {
+        println!(
+            "\
+Enterprise commands (this build):
+  mcp-proxy enroll --control-plane URL --device-token TOKEN [--device-id ID]
+  mcp-proxy approval-mode <local|remote|auto>
+  mcp-proxy test-remote-approval
+"
+        );
+    }
 }
 
 /// Parsed CLI invocation describing the downstream MCP server command.
@@ -903,7 +919,7 @@ async fn main() -> Result<()> {
             println!("mcp-proxy {VERSION}");
             Ok(())
         }
-        CliMode::Demo => run_first_block_demo(),
+        CliMode::Demo => mcp_proxy::demo::run_first_block_demo(),
         CliMode::Pilot(cmd) => run_pilot(cmd).await,
         CliMode::Run(run_command) => run_stdio_mode(run_command).await,
         CliMode::Serve { listen, upstream } => run_serve_mode(listen, upstream).await,
