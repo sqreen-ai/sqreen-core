@@ -419,3 +419,188 @@ fn concurrent_activate_prefers_higher_revision() {
         PolicyRejectReason::Rollback
     );
 }
+
+fn signed_with_seed(
+    org: &str,
+    revision: u64,
+    policy: PolicyConfig,
+    key_id: &str,
+    seed: &[u8; 32],
+) -> SignedPolicyEnvelope {
+    let env = SignedPolicyEnvelope {
+        schema_version: ENVELOPE_SCHEMA_VERSION,
+        key_id: key_id.into(),
+        policy_id: "default".into(),
+        organization_id: org.into(),
+        revision,
+        issued_at: "2026-09-02T12:00:00Z".into(),
+        not_before: "2026-09-02T12:00:00Z".into(),
+        expires_at: None,
+        previous_revision: if revision > 1 {
+            Some(revision - 1)
+        } else {
+            None
+        },
+        policy_digest: String::new(),
+        policy,
+        signature: String::new(),
+    };
+    sign_envelope_with_seed(env, seed).expect("sign")
+}
+
+#[test]
+fn trust_root_fingerprint_constants_match_incident_values() {
+    assert_eq!(
+        PRIMARY_PUBKEY_SHA256,
+        "56f37ada7590662eb5e1208708a9cfab115daed493715a7a4295f57618a775a0"
+    );
+    assert_eq!(
+        SECONDARY_PUBKEY_SHA256,
+        "429c6c7b632634fcbeb321ef48b3c0e011978dff3bd55a6b9061c7943d7fd91b"
+    );
+    assert_eq!(PRIMARY_POLICY_KEY_ID, "sqreen-policy-ed25519-1");
+    assert_eq!(SECONDARY_POLICY_KEY_ID, "sqreen-policy-ed25519-2");
+}
+
+#[test]
+fn rotation_fixture_valid_signature_accepted() {
+    let _g = super::signed::test_env_lock();
+    std::env::set_var(ORG_ID_ENV, "acme");
+    let seed = super::signed::rotation_fixture_seed_for_test();
+    let env = signed_with_seed(
+        "acme",
+        1,
+        sample_policy("1"),
+        super::signed::ROTATION_FIXTURE_KEY_ID,
+        &seed,
+    );
+    verify_signature(&env).expect("fixture signature");
+    activate_signed_policy(env, &PolicyAcceptanceState::default(), None).expect("activate");
+}
+
+#[test]
+fn legacy_test_key_valid_signature_still_accepted() {
+    let _g = super::signed::test_env_lock();
+    std::env::set_var(ORG_ID_ENV, "acme");
+    let env = signed("acme", 1, sample_policy("1"));
+    assert_eq!(env.key_id, TEST_POLICY_KEY_ID);
+    verify_signature(&env).unwrap();
+    activate_signed_policy(env, &PolicyAcceptanceState::default(), None).unwrap();
+}
+
+#[test]
+fn rotation_fixture_signature_under_secondary_kid_rejected() {
+    // Signature from fixture key must not verify under production -2 pubkey.
+    let seed = super::signed::rotation_fixture_seed_for_test();
+    let env = signed_with_seed(
+        "acme",
+        1,
+        sample_policy("1"),
+        SECONDARY_POLICY_KEY_ID,
+        &seed,
+    );
+    assert_eq!(
+        verify_signature(&env),
+        Err(PolicyRejectReason::InvalidSignature)
+    );
+}
+
+#[test]
+fn test_key_signature_under_primary_kid_rejected() {
+    let env = signed_with_seed(
+        "acme",
+        1,
+        sample_policy("1"),
+        PRIMARY_POLICY_KEY_ID,
+        &test_seed(),
+    );
+    assert_eq!(
+        verify_signature(&env),
+        Err(PolicyRejectReason::InvalidSignature)
+    );
+}
+
+#[test]
+fn test_key_signature_under_secondary_kid_rejected() {
+    let env = signed_with_seed(
+        "acme",
+        1,
+        sample_policy("1"),
+        SECONDARY_POLICY_KEY_ID,
+        &test_seed(),
+    );
+    assert_eq!(
+        verify_signature(&env),
+        Err(PolicyRejectReason::InvalidSignature)
+    );
+}
+
+#[test]
+fn rotation_fixture_signature_under_test_kid_rejected() {
+    let seed = super::signed::rotation_fixture_seed_for_test();
+    let env = signed_with_seed("acme", 1, sample_policy("1"), TEST_POLICY_KEY_ID, &seed);
+    assert_eq!(
+        verify_signature(&env),
+        Err(PolicyRejectReason::InvalidSignature)
+    );
+}
+
+#[test]
+fn cache_upgrade_legacy_then_newer_then_rollback() {
+    let _g = super::signed::test_env_lock();
+    std::env::set_var(ORG_ID_ENV, "acme");
+
+    // Simulate cached legacy-valid policy (test key stands in for historical trust).
+    let legacy = signed("acme", 1, sample_policy("legacy-cache"));
+    let act1 = activate_signed_policy(legacy, &PolicyAcceptanceState::default(), None).unwrap();
+    let state1 = acceptance_from_envelope(&act1.envelope);
+    assert_eq!(state1.highest_revision, 1);
+
+    // Upgrade path: newer revision under the rotation fixture trust id.
+    let seed = super::signed::rotation_fixture_seed_for_test();
+    let newer = signed_with_seed(
+        "acme",
+        2,
+        sample_policy("rotation-v2"),
+        super::signed::ROTATION_FIXTURE_KEY_ID,
+        &seed,
+    );
+    let act2 = activate_signed_policy(newer, &state1, None).unwrap();
+    let state2 = acceptance_from_envelope(&act2.envelope);
+    assert_eq!(state2.highest_revision, 2);
+    assert_eq!(state2.key_id, super::signed::ROTATION_FIXTURE_KEY_ID);
+
+    // Rollback to older revision rejected.
+    let older = signed("acme", 1, sample_policy("legacy-cache"));
+    assert_eq!(
+        activate_signed_policy(older, &state2, None).unwrap_err(),
+        PolicyRejectReason::Rollback
+    );
+}
+
+#[test]
+fn expired_envelope_marks_stale_but_remains_activatable() {
+    // Current Core semantics: expired signed envelopes still activate as
+    // last-known-good with policy_expired / stale_policy_in_use audit events
+    // (fail-closed for *invalid* signatures, not for clock-skewed LKG).
+    let _g = super::signed::test_env_lock();
+    std::env::set_var(ORG_ID_ENV, "acme");
+    let mut env = SignedPolicyEnvelope {
+        schema_version: ENVELOPE_SCHEMA_VERSION,
+        key_id: TEST_POLICY_KEY_ID.into(),
+        policy_id: "default".into(),
+        organization_id: "acme".into(),
+        revision: 1,
+        issued_at: "2020-01-01T00:00:00Z".into(),
+        not_before: "2020-01-01T00:00:00Z".into(),
+        expires_at: Some("2020-01-02T00:00:00Z".into()),
+        previous_revision: None,
+        policy_digest: String::new(),
+        policy: sample_policy("expired"),
+        signature: String::new(),
+    };
+    env = sign_envelope_with_seed(env, &test_seed()).unwrap();
+    let act = activate_signed_policy(env, &PolicyAcceptanceState::default(), None).unwrap();
+    assert!(act.events.iter().any(|e| *e == "policy_expired"));
+    assert!(act.events.iter().any(|e| *e == "stale_policy_in_use"));
+}

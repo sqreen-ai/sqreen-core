@@ -38,10 +38,11 @@ pub use schema::{
 pub use signed::{
     acceptance_from_envelope, acceptance_path_beside_cache, activate_signed_policy,
     emit_policy_event, load_acceptance, load_signed_envelope, parse_sync_response,
-    persist_acceptance, persist_signed_envelope, policy_digest, reject_err, require_signed_policy,
-    verify_signature, PolicyAcceptanceState, PolicyRejectReason, SignedPolicyEnvelope,
-    VerifiedPolicyActivation, ALLOW_TEST_KEYS_ENV, ALLOW_UNSIGNED_ENV, ENVELOPE_SCHEMA_VERSION,
-    ORG_ID_ENV, ORG_ID_ENV_ALT, PRIMARY_POLICY_KEY_ID, TEST_POLICY_KEY_ID,
+    persist_acceptance, persist_signed_envelope, policy_digest, pubkey_sha256_hex, reject_err,
+    require_signed_policy, verify_signature, PolicyAcceptanceState, PolicyRejectReason,
+    SignedPolicyEnvelope, VerifiedPolicyActivation, ALLOW_TEST_KEYS_ENV, ALLOW_UNSIGNED_ENV,
+    ENVELOPE_SCHEMA_VERSION, ORG_ID_ENV, ORG_ID_ENV_ALT, PRIMARY_POLICY_KEY_ID,
+    PRIMARY_PUBKEY_SHA256, SECONDARY_POLICY_KEY_ID, SECONDARY_PUBKEY_SHA256, TEST_POLICY_KEY_ID,
 };
 pub use validate::{is_legacy_only, validate_config};
 

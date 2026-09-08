@@ -1,6 +1,6 @@
 [package]
 name = "mcp-proxy"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 description = "Local-first runtime security firewall for MCP and OpenAI-compatible agent tool calls"
 license = "MIT OR Apache-2.0"
