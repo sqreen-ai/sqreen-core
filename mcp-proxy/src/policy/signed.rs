@@ -28,8 +28,13 @@ use super::PolicyEngine;
 /// Envelope schema version understood by this binary.
 pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
 
-/// Primary trust-root key id (pinned with the binary).
+/// Legacy / v0.1.12 primary trust-root key id (pinned with the binary).
 pub const PRIMARY_POLICY_KEY_ID: &str = "sqreen-policy-ed25519-1";
+
+/// Rotation trust-root key id (v0.1.13+). Managed fleets should emit this
+/// `key_id` after operators upgrade edge binaries to a release that pins the
+/// corresponding public key.
+pub const SECONDARY_POLICY_KEY_ID: &str = "sqreen-policy-ed25519-2";
 
 /// Test-only key id — never trusted in production.
 pub const TEST_POLICY_KEY_ID: &str = "sqreen-policy-ed25519-test";
@@ -43,14 +48,32 @@ pub const ALLOW_UNSIGNED_ENV: &str = "SQREEN_ALLOW_UNSIGNED_POLICY";
 /// Opt-in: trust the built-in test verification key (never in production).
 pub const ALLOW_TEST_KEYS_ENV: &str = "SQREEN_POLICY_ALLOW_TEST_KEYS";
 /// Extra trusted keys during rotation: `kid:hex32,...`
+///
+/// Extra entries cannot replace pinned trust-root key ids (`-1`, `-2`).
 pub const EXTRA_TRUSTED_KEYS_ENV: &str = "SQREEN_POLICY_TRUSTED_KEYS";
 /// Production marker — rejects test keys and unsigned paths.
 pub const PRODUCTION_ENV: &str = "SQREEN_ENV";
 
-/// Pinned Sqreen policy-signing public key (raw Ed25519, 32 bytes).
+/// SHA-256 of the legacy (`-1`) raw Ed25519 public key (public fingerprint).
+pub const PRIMARY_PUBKEY_SHA256: &str =
+    "56f37ada7590662eb5e1208708a9cfab115daed493715a7a4295f57618a775a0";
+
+/// SHA-256 of the rotation (`-2`) raw Ed25519 public key (public fingerprint).
+pub const SECONDARY_PUBKEY_SHA256: &str =
+    "429c6c7b632634fcbeb321ef48b3c0e011978dff3bd55a6b9061c7943d7fd91b";
+
+/// Pinned Sqreen policy-signing public key for `sqreen-policy-ed25519-1`
+/// (raw Ed25519, 32 bytes). Matches `keys/sqreen-policy-ed25519.pub`.
 const PRIMARY_PUBKEY: [u8; 32] = [
     0xaa, 0x15, 0x6e, 0x94, 0x7a, 0x69, 0xde, 0x8c, 0x09, 0xad, 0x41, 0x37, 0xf4, 0x33, 0x3a, 0x12,
     0x00, 0x08, 0xa9, 0xea, 0x21, 0xae, 0xdf, 0xc1, 0xb5, 0xe3, 0x03, 0x1a, 0x89, 0x88, 0xdd, 0x0b,
+];
+
+/// Pinned Sqreen policy-signing public key for `sqreen-policy-ed25519-2`
+/// (raw Ed25519, 32 bytes). Matches `keys/sqreen-policy-ed25519-2.pub`.
+const SECONDARY_PUBKEY: [u8; 32] = [
+    0xc7, 0x8b, 0xf5, 0xc8, 0xab, 0x86, 0x33, 0x8e, 0xf8, 0x99, 0x12, 0x8b, 0xc2, 0x44, 0x26, 0x60,
+    0x1d, 0x73, 0xd3, 0x35, 0x44, 0x87, 0x5d, 0x7d, 0x07, 0xf9, 0x2c, 0xdf, 0x3a, 0xe0, 0xdc, 0x88,
 ];
 
 /// Test fixture public key — only when explicitly enabled.
@@ -253,8 +276,14 @@ fn trusted_keys() -> &'static BTreeMap<String, VerifyingKey> {
     static KEYS: OnceLock<BTreeMap<String, VerifyingKey>> = OnceLock::new();
     KEYS.get_or_init(|| {
         let mut map = BTreeMap::new();
+        // Pinned trust set: key_id → exact public key. Verification always
+        // resolves by envelope key_id; a signature under a different trusted
+        // key still fails.
         if let Ok(key) = VerifyingKey::from_bytes(&PRIMARY_PUBKEY) {
             map.insert(PRIMARY_POLICY_KEY_ID.to_string(), key);
+        }
+        if let Ok(key) = VerifyingKey::from_bytes(&SECONDARY_PUBKEY) {
+            map.insert(SECONDARY_POLICY_KEY_ID.to_string(), key);
         }
 
         let allow_test = cfg!(test)
@@ -269,6 +298,17 @@ fn trusted_keys() -> &'static BTreeMap<String, VerifyingKey> {
             if let Ok(key) = VerifyingKey::from_bytes(&TEST_PUBKEY) {
                 map.insert(TEST_POLICY_KEY_ID.to_string(), key);
             }
+            #[cfg(test)]
+            {
+                // Independent fixture keypair for trust-set accept/reject tests.
+                // Not production material; never enabled outside cfg(test).
+                use ed25519_dalek::SigningKey;
+                let sk = SigningKey::from_bytes(&rotation_fixture_seed());
+                map.insert(
+                    ROTATION_FIXTURE_KEY_ID.to_string(),
+                    sk.verifying_key(),
+                );
+            }
         }
 
         if let Ok(raw) = std::env::var(EXTRA_TRUSTED_KEYS_ENV) {
@@ -280,12 +320,20 @@ fn trusted_keys() -> &'static BTreeMap<String, VerifyingKey> {
                 let Some((kid, hex_key)) = part.split_once(':') else {
                     continue;
                 };
+                let kid = kid.trim();
+                // Never replace pinned trust-root ids via environment.
+                if kid == PRIMARY_POLICY_KEY_ID || kid == SECONDARY_POLICY_KEY_ID {
+                    continue;
+                }
+                if map.contains_key(kid) {
+                    continue;
+                }
                 if let Ok(bytes) = hex::decode(hex_key.trim()) {
                     if bytes.len() == 32 {
                         let mut arr = [0u8; 32];
                         arr.copy_from_slice(&bytes);
                         if let Ok(key) = VerifyingKey::from_bytes(&arr) {
-                            map.insert(kid.trim().to_string(), key);
+                            map.insert(kid.to_string(), key);
                         }
                     }
                 }
@@ -294,6 +342,11 @@ fn trusted_keys() -> &'static BTreeMap<String, VerifyingKey> {
 
         map
     })
+}
+
+/// Public fingerprint helper for docs/tests (SHA-256 hex of raw 32-byte pubkey).
+pub fn pubkey_sha256_hex(raw: &[u8; 32]) -> String {
+    hex::encode(Sha256::digest(raw))
 }
 
 fn resolve_expected_org() -> Option<String> {
@@ -560,6 +613,26 @@ pub fn sign_envelope_with_seed(
     let sig = sk.sign(&message);
     env.signature = B64.encode(sig.to_bytes());
     Ok(env)
+}
+
+/// Independent trust-set fixture key id (cfg(test) only).
+#[cfg(test)]
+pub const ROTATION_FIXTURE_KEY_ID: &str = "sqreen-policy-ed25519-rotation-fixture";
+
+#[cfg(test)]
+fn rotation_fixture_seed() -> [u8; 32] {
+    // Deterministic non-production seed for trust-set accept/reject tests.
+    let hex = "eb29194ffa060a8f8976361978da65279ce59dd8c27f25da4818a0b1ca261d4d";
+    let bytes = hex::decode(hex).expect("fixture seed hex");
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    seed
+}
+
+/// Test-only accessor for the rotation fixture seed.
+#[cfg(test)]
+pub fn rotation_fixture_seed_for_test() -> [u8; 32] {
+    rotation_fixture_seed()
 }
 
 pub fn require_signed_policy() -> bool {

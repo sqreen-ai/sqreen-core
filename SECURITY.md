@@ -37,7 +37,9 @@ Sqreen Core is **local-first**:
 - Intercepts agent tool calls (MCP stdio and related adapters)
 - Evaluates **local policy** plus a mandatory security baseline
 - Can **ALLOW**, **DENY**, or require **local confirmation**
-- Verifies **signed policy envelopes** when configured (verification only)
+- Verifies **signed policy envelopes** against a pinned `key_id → public key`
+  trust set when configured (verification only; unknown ids and wrong-key
+  signatures fail closed; legacy and rotation roots may coexist during migration)
 - Keeps enforcement authoritative on the developer machine without a control-plane round trip
 
 Public docs that expand on this model:
